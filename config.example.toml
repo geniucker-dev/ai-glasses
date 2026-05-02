@@ -1,0 +1,54 @@
+[server]
+host = "0.0.0.0"
+port = 8081
+public_base_url = "http://192.168.1.100:8081"
+
+[device]
+id = "xiao-esp32s3-sense-01"
+
+[device.wifi]
+ssid = "your-wifi-ssid"
+password = "your-wifi-password"
+
+[device.capture]
+video_fps = 6
+jpeg_quality = 12
+frame_size = "VGA"
+audio_sample_rate = 16000
+audio_chunk_ms = 100
+imu_hz = 50
+
+[device.audio_down]
+enabled = false
+
+[models]
+blind_path = "models/yolo-seg_ncnn_model"
+obstacle = "models/yoloe-11l-seg_ncnn_model"
+traffic_light = "models/trafficlight_ncnn_model"
+image_width = 640
+image_height = 480
+ncnn_device = "vulkan"
+
+[vision.thresholds]
+blind_path_conf = 0.35
+obstacle_conf = 0.35
+traffic_light_conf = 0.35
+mask_min_area = 0.01
+
+[asr]
+enabled = true
+provider = "dashscope"
+model = "paraformer-realtime-v2"
+dashscope_api_key = "replace-with-your-dashscope-api-key"
+websocket_base_url = "wss://dashscope.aliyuncs.com/api-ws/v1/inference"
+http_base_url = "https://dashscope.aliyuncs.com/api/v1"
+sample_rate = 16000
+language = "zh-CN"
+
+[speech]
+enabled = false
+mode = "ui"
+voice_dir = "voice"
+
+[web]
+title = "AI Glasses Console"

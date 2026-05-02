@@ -1,0 +1,60 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>AI Glasses Console</title>
+    <link rel="stylesheet" href="/static/styles.css" />
+  </head>
+  <body>
+    <main class="shell">
+      <section class="video-zone" aria-label="实时画面">
+        <header class="topbar">
+          <div>
+            <h1>AI Glasses Console</h1>
+            <p id="mode">idle</p>
+          </div>
+          <div class="status-strip">
+            <span id="control" class="chip">CTRL</span>
+            <span id="video" class="chip">VIDEO</span>
+            <span id="audio" class="chip">AUDIO</span>
+            <span id="asr" class="chip">ASR</span>
+          </div>
+        </header>
+
+        <div class="frame-wrap">
+          <img id="frame" alt="ESP32 camera stream" />
+          <canvas id="overlay"></canvas>
+          <div id="empty" class="empty">waiting for frames</div>
+        </div>
+
+        <div class="metrics">
+          <div><b id="fps">0</b><span>frames</span></div>
+          <div><b id="uptime">0s</b><span>uptime</span></div>
+          <div><b id="light">--</b><span>traffic</span></div>
+          <div><b id="imuBrief">--</b><span>imu</span></div>
+        </div>
+      </section>
+
+      <aside class="side">
+        <section class="panel command-panel">
+          <form id="commandForm">
+            <input id="commandInput" type="text" placeholder="输入调试指令，例如：开始导航" autocomplete="off" />
+            <button type="submit">Send</button>
+          </form>
+        </section>
+
+        <section class="panel log-panel">
+          <h2>播报 / 指令</h2>
+          <div id="log" class="log"></div>
+        </section>
+
+        <section class="panel dense">
+          <h2>状态</h2>
+          <pre id="state">{}</pre>
+        </section>
+      </aside>
+    </main>
+    <script src="/static/app.js" type="module"></script>
+  </body>
+</html>

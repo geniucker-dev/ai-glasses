@@ -1,0 +1,280 @@
+:root {
+  --ink: #12130f;
+  --paper: #f6f1e7;
+  --panel: #fffaf0;
+  --rail: #20241b;
+  --accent: #e4572e;
+  --green: #2f9c67;
+  --yellow: #c59a21;
+  --muted: #6b6f62;
+  --line: rgba(18, 19, 15, 0.16);
+  font-family: "Avenir Next", "Gill Sans", "Trebuchet MS", sans-serif;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  min-height: 100vh;
+  color: var(--ink);
+  background:
+    linear-gradient(90deg, rgba(32, 36, 27, 0.06) 1px, transparent 1px),
+    linear-gradient(0deg, rgba(32, 36, 27, 0.05) 1px, transparent 1px),
+    var(--paper);
+  background-size: 28px 28px;
+  overflow: hidden;
+}
+
+.shell {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 410px;
+  gap: 18px;
+  height: 100vh;
+  height: 100dvh;
+  padding: 18px;
+  overflow: hidden;
+}
+
+.video-zone,
+.panel {
+  border: 1px solid var(--line);
+  background: rgba(255, 250, 240, 0.88);
+  box-shadow: 0 18px 60px rgba(25, 26, 20, 0.10);
+}
+
+.video-zone {
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr) auto;
+  min-width: 0;
+  min-height: 0;
+}
+
+.topbar {
+  display: flex;
+  justify-content: space-between;
+  gap: 18px;
+  align-items: center;
+  padding: 18px;
+  border-bottom: 1px solid var(--line);
+}
+
+h1,
+h2,
+p {
+  margin: 0;
+}
+
+h1 {
+  font-size: 26px;
+  letter-spacing: 0;
+}
+
+h2 {
+  font-size: 14px;
+  text-transform: uppercase;
+  letter-spacing: 0;
+  margin-bottom: 12px;
+}
+
+#mode {
+  color: var(--muted);
+  margin-top: 4px;
+}
+
+.status-strip {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  justify-content: flex-end;
+}
+
+.chip {
+  display: inline-flex;
+  align-items: center;
+  min-height: 30px;
+  padding: 0 10px;
+  border: 1px solid var(--line);
+  background: #fff;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.chip.live {
+  color: #fff;
+  background: var(--green);
+  border-color: var(--green);
+}
+
+.frame-wrap {
+  position: relative;
+  overflow: hidden;
+  background: #171a14;
+  aspect-ratio: 4 / 3;
+  height: 100%;
+  max-width: 100%;
+  align-self: center;
+  justify-self: center;
+}
+
+#frame,
+#overlay {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+}
+
+#overlay {
+  pointer-events: none;
+}
+
+.empty {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  color: rgba(255, 250, 240, 0.62);
+  font-size: 18px;
+}
+
+.metrics {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  border-top: 1px solid var(--line);
+}
+
+.metrics div {
+  padding: 14px 18px;
+  border-right: 1px solid var(--line);
+}
+
+.metrics div:last-child {
+  border-right: 0;
+}
+
+.metrics b {
+  display: block;
+  font-size: 22px;
+}
+
+.metrics span {
+  color: var(--muted);
+  font-size: 12px;
+  text-transform: uppercase;
+}
+
+.side {
+  display: grid;
+  grid-template-rows: auto minmax(220px, 1fr) minmax(220px, 0.9fr);
+  gap: 18px;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.panel {
+  padding: 16px;
+  overflow: hidden;
+  min-height: 0;
+}
+
+.log-panel {
+  display: flex;
+  flex-direction: column;
+}
+
+.command-panel {
+  padding: 10px;
+}
+
+form {
+  display: grid;
+  grid-template-columns: 1fr 84px;
+  gap: 8px;
+}
+
+input,
+button {
+  height: 42px;
+  border: 1px solid var(--line);
+  font: inherit;
+}
+
+input {
+  padding: 0 12px;
+  background: #fff;
+}
+
+button {
+  background: var(--rail);
+  color: #fff;
+  cursor: pointer;
+  font-weight: 700;
+}
+
+.log {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding-right: 4px;
+}
+
+.entry {
+  padding: 10px 12px;
+  border-left: 4px solid var(--line);
+  background: rgba(255, 255, 255, 0.72);
+}
+
+.entry.speech {
+  border-color: var(--accent);
+}
+
+.entry.command {
+  border-color: var(--green);
+}
+
+.entry small {
+  display: block;
+  color: var(--muted);
+  margin-bottom: 4px;
+}
+
+pre {
+  height: calc(100% - 28px);
+  margin: 0;
+  overflow: auto;
+  white-space: pre-wrap;
+  font-family: "SFMono-Regular", "Cascadia Code", monospace;
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+@media (max-width: 980px) {
+  .shell {
+    grid-template-columns: 1fr;
+    padding: 10px;
+    overflow: auto;
+  }
+
+  body {
+    overflow: auto;
+  }
+
+  .video-zone {
+    min-height: 62vh;
+  }
+
+  .side {
+    grid-template-rows: auto 360px 320px;
+  }
+
+  .metrics {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
