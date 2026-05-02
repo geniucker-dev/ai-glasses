@@ -75,6 +75,7 @@ class VisionPipeline:
                 path,
                 min_mask_area=self.config.vision_thresholds.mask_min_area,
                 ncnn_device=self.config.models.ncnn_device,
+                ncnn_device_index=self.config.models.ncnn_device_index,
                 **kwargs,
             )
             self.model_status[name] = "configured"

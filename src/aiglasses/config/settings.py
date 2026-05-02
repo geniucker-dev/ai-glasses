@@ -49,6 +49,7 @@ class ModelsConfig:
     image_width: int = 640
     image_height: int = 480
     ncnn_device: str = "vulkan"
+    ncnn_device_index: int | None = None
 
 
 @dataclass(frozen=True)

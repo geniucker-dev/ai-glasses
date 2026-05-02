@@ -53,6 +53,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="Override models.ncnn_device for this benchmark, for example vulkan or cpu.",
     )
     parser.add_argument(
+        "--device-index",
+        type=int,
+        help="Optional Vulkan device index. Defaults to models.ncnn_device_index or ncnn default.",
+    )
+    parser.add_argument(
         "--model",
         action="append",
         choices=("blind_path", "obstacle", "traffic_light"),
@@ -122,9 +127,15 @@ def build_models(
     config: AppConfig,
     selected_names: set[str],
     device_override: str | None,
+    device_index_override: int | None,
 ) -> list[tuple[ModelSpec, NcnnYoloModel]]:
     image_size = (config.models.image_width, config.models.image_height)
     ncnn_device = device_override or config.models.ncnn_device
+    ncnn_device_index = (
+        device_index_override
+        if device_index_override is not None
+        else config.models.ncnn_device_index
+    )
     specs = [spec for spec in model_specs(config) if spec.name in selected_names]
     return [
         (
@@ -135,6 +146,7 @@ def build_models(
                 confidence=spec.confidence,
                 kind=spec.kind,
                 ncnn_device=ncnn_device,
+                ncnn_device_index=ncnn_device_index,
                 min_mask_area=config.vision_thresholds.mask_min_area,
             ),
         )
@@ -155,11 +167,15 @@ def benchmark(config: AppConfig, args: argparse.Namespace) -> None:
         raise ValueError("--warmup-rounds cannot be negative")
 
     selected = set(args.model or ("blind_path", "obstacle", "traffic_light"))
-    models = build_models(config, selected, args.device)
+    models = build_models(config, selected, args.device, args.device_index)
     frame = load_frame(config, args.image, args.seed)
     ncnn_device = args.device or config.models.ncnn_device
+    ncnn_device_index = (
+        args.device_index if args.device_index is not None else config.models.ncnn_device_index
+    )
 
     print(f"ncnn_device={ncnn_device}")
+    print(f"ncnn_device_index={ncnn_device_index if ncnn_device_index is not None else 'default'}")
     print(f"image={config.models.image_width}x{config.models.image_height}")
     print(f"runs={args.runs} warmup_rounds={args.warmup_rounds}")
     print("loading models...")

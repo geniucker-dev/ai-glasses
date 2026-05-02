@@ -141,6 +141,7 @@ class NcnnYoloModel:
         confidence: float,
         kind: str,
         ncnn_device: str = "vulkan",
+        ncnn_device_index: int | None = None,
         min_mask_area: float = 0.01,
     ) -> None:
         self.path = validate_ncnn_model_dir(path)
@@ -148,6 +149,7 @@ class NcnnYoloModel:
         self.confidence = confidence
         self.kind = kind
         self.ncnn_device = ncnn_device
+        self.ncnn_device_index = ncnn_device_index
         self.min_mask_area = min_mask_area
         self.names = _load_names(self.path)
         self.output_blobs = _load_output_blobs(self.path)
@@ -166,6 +168,12 @@ class NcnnYoloModel:
             opt = self._net.opt
             if hasattr(opt, "use_vulkan_compute"):
                 opt.use_vulkan_compute = self.ncnn_device in {"auto", "gpu", "vulkan"}
+                if (
+                    opt.use_vulkan_compute
+                    and self.ncnn_device_index is not None
+                    and hasattr(self._net, "set_vulkan_device")
+                ):
+                    self._net.set_vulkan_device(self.ncnn_device_index)
             if hasattr(opt, "num_threads"):
                 opt.num_threads = 4
         self._net.load_param(str(self.path / "model.ncnn.param"))

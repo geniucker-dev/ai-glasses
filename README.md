@@ -101,9 +101,11 @@ traffic_light = "models/trafficlight_ncnn_model"
 image_width = 640
 image_height = 480
 ncnn_device = "vulkan"
+# 可选；取消注释后可固定 Vulkan 设备编号；保持注释时使用 ncnn 默认设备
+# ncnn_device_index = 1
 ```
 
-`ncnn_device = "vulkan"` 会启用 NCNN Vulkan 推理；当前 NCNN 默认启用 `fp16_storage`、`fp16_packed` 和 `fp16_arithmetic`。如果要对比 CPU/GPU，可用 benchmark 的 `--device` 临时覆盖。
+`ncnn_device = "vulkan"` 会启用 NCNN Vulkan 推理；当前 NCNN 默认启用 `fp16_storage`、`fp16_packed` 和 `fp16_arithmetic`。多 Vulkan 设备时，取消注释 `ncnn_device_index` 可指定设备编号；不写这个键时使用 ncnn 默认设备。可用 benchmark 的 `--device` 和 `--device-index` 临时覆盖。
 
 ### 模型 Benchmark
 
@@ -143,6 +145,7 @@ uv run aiglasses-model-benchmark --config config.toml --image test-frame.jpg
 
 ```bash
 uv run aiglasses-model-benchmark --config config.toml --device vulkan
+uv run aiglasses-model-benchmark --config config.toml --device vulkan --device-index 1
 uv run aiglasses-model-benchmark --config config.toml --device cpu
 ```
 

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import unittest
 
-from aiglasses.benchmark import format_stats, summarize_samples
+from aiglasses.benchmark import build_parser, format_stats, summarize_samples
 
 
 class BenchmarkTests(unittest.TestCase):
@@ -23,6 +23,12 @@ class BenchmarkTests(unittest.TestCase):
             format_stats(stats),
             "min=1.00ms p50=2.00ms mean=2.00ms p90=3.00ms p95=3.00ms max=3.00ms",
         )
+
+    def test_parser_accepts_device_index(self) -> None:
+        args = build_parser().parse_args(["--device", "vulkan", "--device-index", "1"])
+
+        self.assertEqual(args.device, "vulkan")
+        self.assertEqual(args.device_index, 1)
 
 
 if __name__ == "__main__":

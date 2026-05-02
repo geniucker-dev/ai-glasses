@@ -28,6 +28,8 @@ traffic_light = "models/trafficlight_ncnn_model"
 image_width = 640
 image_height = 480
 ncnn_device = "vulkan"
+# Optional. Uncomment to pin a Vulkan device index; leave commented to use ncnn's default.
+# ncnn_device_index = 1
 
 [vision.thresholds]
 blind_path_conf = 0.35
