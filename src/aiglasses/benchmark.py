@@ -11,7 +11,8 @@ import numpy as np
 
 from aiglasses.config import load_config
 from aiglasses.config.settings import AppConfig
-from aiglasses.vision.ncnn_yolo import NcnnYoloModel
+from aiglasses.vision.obstacle_classes import YOLOE_OBSTACLE_CLASS_NAMES
+from aiglasses.vision.torch_yolo import TorchYoloModel
 
 
 @dataclass(frozen=True)
@@ -33,7 +34,7 @@ class TimingStats:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Benchmark configured NCNN models.")
+    parser = argparse.ArgumentParser(description="Benchmark configured vision models.")
     parser.add_argument("--config", default="config.toml", help="Path to TOML config.")
     parser.add_argument("--runs", type=int, default=100, help="Measured runs per benchmark.")
     parser.add_argument(
@@ -49,13 +50,14 @@ def build_parser() -> argparse.ArgumentParser:
         help="Optional image file to benchmark instead of a deterministic random frame.",
     )
     parser.add_argument(
-        "--device",
-        help="Override models.ncnn_device for this benchmark, for example vulkan or cpu.",
+        "--torch-device",
+        help="Override models.torch_device, for example cuda:0 or cpu.",
     )
     parser.add_argument(
-        "--device-index",
-        type=int,
-        help="Optional Vulkan device index. Defaults to models.ncnn_device_index or ncnn default.",
+        "--torch-half",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Override models.torch_half.",
     )
     parser.add_argument(
         "--model",
@@ -126,32 +128,27 @@ def load_frame(config: AppConfig, image_path: Path | None, seed: int) -> np.ndar
 def build_models(
     config: AppConfig,
     selected_names: set[str],
-    device_override: str | None,
-    device_index_override: int | None,
-) -> list[tuple[ModelSpec, NcnnYoloModel]]:
+    torch_device_override: str | None,
+    torch_half_override: bool | None,
+) -> list[tuple[ModelSpec, TorchYoloModel]]:
     image_size = (config.models.image_width, config.models.image_height)
-    ncnn_device = device_override or config.models.ncnn_device
-    ncnn_device_index = (
-        device_index_override
-        if device_index_override is not None
-        else config.models.ncnn_device_index
-    )
+    torch_device = torch_device_override or config.models.torch_device
+    torch_half = torch_half_override if torch_half_override is not None else config.models.torch_half
     specs = [spec for spec in model_specs(config) if spec.name in selected_names]
-    return [
-        (
-            spec,
-            NcnnYoloModel(
-                spec.path,
-                image_size=image_size,
-                confidence=spec.confidence,
-                kind=spec.kind,
-                ncnn_device=ncnn_device,
-                ncnn_device_index=ncnn_device_index,
-                min_mask_area=config.vision_thresholds.mask_min_area,
-            ),
+    models = []
+    for spec in specs:
+        model = TorchYoloModel(
+            spec.path,
+            image_size=image_size,
+            confidence=spec.confidence,
+            kind=spec.kind,
+            torch_device=torch_device,
+            torch_half=torch_half,
+            min_mask_area=config.vision_thresholds.mask_min_area,
+            class_names=YOLOE_OBSTACLE_CLASS_NAMES if spec.name == "obstacle" else None,
         )
-        for spec in specs
-    ]
+        models.append((spec, model))
+    return models
 
 
 def time_call(fn) -> tuple[float, object]:
@@ -167,15 +164,19 @@ def benchmark(config: AppConfig, args: argparse.Namespace) -> None:
         raise ValueError("--warmup-rounds cannot be negative")
 
     selected = set(args.model or ("blind_path", "obstacle", "traffic_light"))
-    models = build_models(config, selected, args.device, args.device_index)
-    frame = load_frame(config, args.image, args.seed)
-    ncnn_device = args.device or config.models.ncnn_device
-    ncnn_device_index = (
-        args.device_index if args.device_index is not None else config.models.ncnn_device_index
+    models = build_models(
+        config,
+        selected,
+        args.torch_device,
+        args.torch_half,
     )
+    frame = load_frame(config, args.image, args.seed)
+    torch_device = args.torch_device or config.models.torch_device
+    torch_half = args.torch_half if args.torch_half is not None else config.models.torch_half
 
-    print(f"ncnn_device={ncnn_device}")
-    print(f"ncnn_device_index={ncnn_device_index if ncnn_device_index is not None else 'default'}")
+    print("runtime=torch")
+    print(f"torch_device={torch_device}")
+    print(f"torch_half={torch_half}")
     print(f"image={config.models.image_width}x{config.models.image_height}")
     print(f"runs={args.runs} warmup_rounds={args.warmup_rounds}")
     print("loading models...")

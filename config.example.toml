@@ -22,14 +22,13 @@ imu_hz = 50
 enabled = false
 
 [models]
-blind_path = "models/yolo-seg_ncnn_model"
-obstacle = "models/yoloe-11l-seg_ncnn_model"
-traffic_light = "models/trafficlight_ncnn_model"
+blind_path = "models/yolo-seg.pt"
+obstacle = "models/yoloe-11l-seg-obstacle.pt"
+traffic_light = "models/trafficlight.pt"
 image_width = 640
 image_height = 480
-ncnn_device = "vulkan"
-# Optional. Uncomment to pin a Vulkan device index; leave commented to use ncnn's default.
-# ncnn_device_index = 1
+torch_device = "cuda:0"
+torch_half = true
 
 [vision.thresholds]
 blind_path_conf = 0.35

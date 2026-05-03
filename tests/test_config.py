@@ -12,16 +12,21 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(config.server.port, 8081)
         self.assertEqual(config.device.capture.audio_sample_rate, 16000)
         self.assertEqual(config.models.image_width, 640)
-        self.assertIsNone(config.models.ncnn_device_index)
+        self.assertEqual(config.models.torch_device, "cuda:0")
+        self.assertTrue(config.models.torch_half)
 
-    def test_ncnn_device_index_is_optional(self) -> None:
+    def test_models_ignores_unknown_fields(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             config_path = Path(tmp) / "config.toml"
-            config_path.write_text("[models]\nncnn_device = \"vulkan\"\n", encoding="utf-8")
+            config_path.write_text(
+                '[models]\nruntime = "torch"\ntorch_device = "cpu"\n',
+                encoding="utf-8",
+            )
 
             config = load_config(config_path)
 
-        self.assertIsNone(config.models.ncnn_device_index)
+        self.assertEqual(config.models.torch_device, "cpu")
+        self.assertEqual(config.models.obstacle, "models/yoloe-11l-seg-obstacle.pt")
 
     def test_firmware_header_includes_frame_size(self) -> None:
         header = render_header("config.example.toml")

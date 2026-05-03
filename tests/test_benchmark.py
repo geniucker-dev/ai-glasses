@@ -24,11 +24,11 @@ class BenchmarkTests(unittest.TestCase):
             "min=1.00ms p50=2.00ms mean=2.00ms p90=3.00ms p95=3.00ms max=3.00ms",
         )
 
-    def test_parser_accepts_device_index(self) -> None:
-        args = build_parser().parse_args(["--device", "vulkan", "--device-index", "1"])
+    def test_parser_accepts_torch_options(self) -> None:
+        args = build_parser().parse_args(["--torch-device", "cuda:0", "--no-torch-half"])
 
-        self.assertEqual(args.device, "vulkan")
-        self.assertEqual(args.device_index, 1)
+        self.assertEqual(args.torch_device, "cuda:0")
+        self.assertFalse(args.torch_half)
 
 
 if __name__ == "__main__":

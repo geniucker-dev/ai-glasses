@@ -1,7 +1,7 @@
 [project]
 name = "ai-glasses"
 version = "0.1.0"
-description = "NCNN-powered assistive navigation backend and ESP32 firmware for smart glasses."
+description = "Torch-powered assistive navigation backend and ESP32 firmware for smart glasses."
 readme = "README.md"
 requires-python = ">=3.11,<3.13"
 dependencies = [
@@ -12,7 +12,6 @@ dependencies = [
     "opencv-python>=4.8,<5",
     "pillow>=10,<13",
     "dashscope>=1.20,<2",
-    "ncnn>=1.0.20260114",
 ]
 
 [project.scripts]
@@ -28,11 +27,6 @@ dev = [
     "setuptools>=81.0.0",
     "wheel>=0.47.0",
 ]
-export = [
-    "pnnx>=20260409",
-    "ultralytics>=8.3,<9",
-]
-
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"

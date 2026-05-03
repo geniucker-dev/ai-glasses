@@ -8,33 +8,11 @@ import numpy as np
 
 from aiglasses.config import AppConfig
 
-from .ncnn_yolo import ModelUnavailable, NcnnYoloModel, filter_detections
+from .obstacle_classes import OBSTACLE_LABELS, YOLOE_OBSTACLE_CLASS_NAMES
+from .torch_yolo import TorchYoloModel
 from .types import FrameAnalysis
+from .yolo_postprocess import ModelUnavailable, filter_detections
 
-
-OBSTACLE_LABELS = {
-    "bicycle",
-    "car",
-    "motorcycle",
-    "bus",
-    "truck",
-    "animal",
-    "scooter",
-    "stroller",
-    "dog",
-    "pole",
-    "post",
-    "column",
-    "pillar",
-    "bollard",
-    "bench",
-    "chair",
-    "potted plant",
-    "hydrant",
-    "cone",
-    "stone",
-    "box",
-}
 
 NON_SIGNAL_TRAFFIC_LABELS = {None, "blank", "countdown_blank", "crossing"}
 
@@ -60,6 +38,7 @@ class VisionPipeline:
             image_size=size,
             confidence=thresholds.obstacle_conf,
             kind="segment",
+            class_names=YOLOE_OBSTACLE_CLASS_NAMES,
         )
         self.traffic_model = self._optional_model(
             "traffic_light",
@@ -69,13 +48,13 @@ class VisionPipeline:
             kind="detect",
         )
 
-    def _optional_model(self, name: str, path: str, **kwargs: Any) -> NcnnYoloModel | None:
+    def _optional_model(self, name: str, path: str, **kwargs: Any) -> TorchYoloModel | None:
         try:
-            model = NcnnYoloModel(
+            model = TorchYoloModel(
                 path,
                 min_mask_area=self.config.vision_thresholds.mask_min_area,
-                ncnn_device=self.config.models.ncnn_device,
-                ncnn_device_index=self.config.models.ncnn_device_index,
+                torch_device=self.config.models.torch_device,
+                torch_half=self.config.models.torch_half,
                 **kwargs,
             )
             self.model_status[name] = "configured"

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields
 from pathlib import Path
 import tomllib
 
@@ -43,13 +43,13 @@ class DeviceConfig:
 
 @dataclass(frozen=True)
 class ModelsConfig:
-    blind_path: str = "models/yolo-seg_ncnn_model"
-    obstacle: str = "models/yoloe-11l-seg_ncnn_model"
-    traffic_light: str = "models/trafficlight_ncnn_model"
+    blind_path: str = "models/yolo-seg.pt"
+    obstacle: str = "models/yoloe-11l-seg-obstacle.pt"
+    traffic_light: str = "models/trafficlight.pt"
     image_width: int = 640
     image_height: int = 480
-    ncnn_device: str = "vulkan"
-    ncnn_device_index: int | None = None
+    torch_device: str = "cuda:0"
+    torch_half: bool = True
 
 
 @dataclass(frozen=True)
@@ -101,6 +101,11 @@ def _section(data: dict, name: str) -> dict:
     return value if isinstance(value, dict) else {}
 
 
+def _known_fields(cls: type, data: dict) -> dict:
+    names = {item.name for item in fields(cls)}
+    return {key: value for key, value in data.items() if key in names}
+
+
 def load_config(path: str | Path = "config.toml") -> AppConfig:
     config_path = Path(path)
     if not config_path.exists():
@@ -126,7 +131,7 @@ def load_config(path: str | Path = "config.toml") -> AppConfig:
             capture=DeviceCaptureConfig(**capture),
             audio_down=DeviceAudioDownConfig(**audio_down),
         ),
-        models=ModelsConfig(**_section(raw, "models")),
+        models=ModelsConfig(**_known_fields(ModelsConfig, _section(raw, "models"))),
         vision_thresholds=VisionThresholds(**_section(vision, "thresholds")),
         asr=AsrConfig(**_section(raw, "asr")),
         speech=SpeechConfig(**_section(raw, "speech")),
