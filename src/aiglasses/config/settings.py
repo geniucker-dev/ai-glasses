@@ -76,6 +76,13 @@ class AsrConfig:
 class SpeechConfig:
     enabled: bool = False
     mode: str = "ui"
+    provider: str = "dashscope"
+    model: str = "sambert-zhichu-v1"
+    audio_format: str = "pcm"
+    sample_rate: int = 16000
+    volume: int = 50
+    rate: float = 1.0
+    pitch: float = 1.0
     voice_dir: str = "voice"
 
 

@@ -1,3 +1,4 @@
 from .events import SpeechEvent, SpeechHub, SpeechSink, UiSpeechSink
+from .tts import DashscopeTtsSpeechSink
 
-__all__ = ["SpeechEvent", "SpeechHub", "SpeechSink", "UiSpeechSink"]
+__all__ = ["DashscopeTtsSpeechSink", "SpeechEvent", "SpeechHub", "SpeechSink", "UiSpeechSink"]

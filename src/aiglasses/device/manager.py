@@ -41,6 +41,7 @@ class DeviceManager:
     target_video_fps: int = 1
     frame_count: int = 0
     audio_bytes: int = 0
+    speech_seq: int = 0
     started_at: float = field(default_factory=time.time)
 
     async def add_ui(self, ws: WebSocket) -> None:
@@ -109,6 +110,34 @@ class DeviceManager:
             await self.broadcast(
                 {"kind": "device_config", "config": self.device_config_payload(), "sent": True}
             )
+        return sent
+
+    async def send_speech_pcm16(self, pcm16: bytes, *, chunk_bytes: int = 3200) -> bool:
+        if not pcm16:
+            return False
+        sent = False
+        for offset in range(0, len(pcm16), chunk_bytes):
+            ws = self.control_ws
+            if ws is None:
+                return sent
+            chunk = pcm16[offset : offset + chunk_bytes]
+            packet = Packet(
+                PacketType.SPEECH_PCM16,
+                self.speech_seq,
+                int(time.time() * 1000),
+                chunk,
+            )
+            self.speech_seq += 1
+            try:
+                await ws.send_bytes(packet.pack())
+                sent = True
+            except Exception:
+                if self.control_ws is ws:
+                    self.control_ws = None
+                    await self.broadcast(
+                        {"kind": "device", "channel": "control", "connected": False}
+                    )
+                return sent
         return sent
 
     async def handle_control_packet(self, packet: Packet) -> None:

@@ -29,6 +29,7 @@ static constexpr int AUDIO_BYTES_PER_CHUNK = AGL_AUDIO_SAMPLE_RATE * AGL_AUDIO_C
 static constexpr size_t PACKET_HEADER_SIZE = sizeof(PacketHeader);
 static constexpr size_t CONTROL_PACKET_CAPACITY = 1024;
 static constexpr size_t VIDEO_PACKET_CAPACITY = 240 * 1024;
+static constexpr size_t SPEECH_SAMPLES_PER_WRITE = 256;
 
 WebsocketsClient wsControl;
 WebsocketsClient wsVideo;
@@ -49,6 +50,7 @@ uint64_t seqAudio = 0;
 static uint8_t audioPacket[PACKET_HEADER_SIZE + AUDIO_BYTES_PER_CHUNK];
 static uint8_t audioRaw[AUDIO_BYTES_PER_CHUNK];
 static uint8_t controlPacket[CONTROL_PACKET_CAPACITY];
+static int32_t speechOut[SPEECH_SAMPLES_PER_WRITE * 2];
 static uint8_t* videoPacket = nullptr;
 SemaphoreHandle_t controlMutex = nullptr;
 SemaphoreHandle_t videoMutex = nullptr;
@@ -218,6 +220,49 @@ void handle_control_message(const String& payload) {
   Serial.printf("[CFG] target_fps=%d\n", targetVideoFps);
 }
 
+bool parse_packet_header(const uint8_t* data, size_t len, PacketHeader& header) {
+  if (len < PACKET_HEADER_SIZE) return false;
+  memcpy(&header, data, PACKET_HEADER_SIZE);
+  if (memcmp(header.magic, "AGL1", 4) != 0) return false;
+  if (header.version != 1) return false;
+  if (PACKET_HEADER_SIZE + header.payload_len != len) return false;
+  const uint8_t* payload = data + PACKET_HEADER_SIZE;
+  return crc32_update(0, payload, header.payload_len) == header.crc32;
+}
+
+void play_speech_pcm16(const uint8_t* payload, uint32_t len) {
+#if AGL_AUDIO_DOWN_ENABLED
+  size_t offset = 0;
+  while (offset + 1 < len) {
+    size_t remainingSamples = (size_t)(len - offset) / 2;
+    size_t samples = min(SPEECH_SAMPLES_PER_WRITE, remainingSamples);
+    for (size_t i = 0; i < samples; ++i) {
+      int16_t sample = (int16_t)(payload[offset] | (payload[offset + 1] << 8));
+      int32_t expanded = ((int32_t)sample) << 16;
+      speechOut[i * 2] = expanded;
+      speechOut[i * 2 + 1] = expanded;
+      offset += 2;
+    }
+    i2sOut.write((const uint8_t*)speechOut, samples * 2 * sizeof(int32_t));
+  }
+#else
+  (void)payload;
+  (void)len;
+#endif
+}
+
+void handle_control_binary(const uint8_t* data, size_t len) {
+  PacketHeader header;
+  if (!parse_packet_header(data, len, header)) {
+    Serial.println("[WS control] dropping bad binary packet");
+    return;
+  }
+  const uint8_t* payload = data + PACKET_HEADER_SIZE;
+  if (header.type == PKT_SPEECH_PCM16) {
+    play_speech_pcm16(payload, header.payload_len);
+  }
+}
+
 uint32_t current_frame_period_ms() {
   int fps = clamp_video_fps(targetVideoFps);
   uint32_t period = 1000 / fps;
@@ -330,6 +375,11 @@ void connect_wifi() {
 
 void setup_ws_handlers() {
   wsControl.onMessage([](WebsocketsMessage message) {
+    if (message.isBinary()) {
+      const WSString& data = message.rawData();
+      handle_control_binary((const uint8_t*)data.data(), data.size());
+      return;
+    }
     handle_control_message(message.data());
   });
   wsControl.onEvent([](WebsocketsEvent ev, String) {

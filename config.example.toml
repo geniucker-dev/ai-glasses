@@ -49,6 +49,13 @@ language = "zh-CN"
 [speech]
 enabled = false
 mode = "ui"
+provider = "dashscope"
+model = "sambert-zhichu-v1"
+audio_format = "pcm"
+sample_rate = 16000
+volume = 50
+rate = 1.0
+pitch = 1.0
 voice_dir = "voice"
 
 [web]

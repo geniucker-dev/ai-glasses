@@ -14,6 +14,9 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(config.models.image_width, 640)
         self.assertEqual(config.models.torch_device, "cuda:0")
         self.assertTrue(config.models.torch_half)
+        self.assertEqual(config.speech.model, "sambert-zhichu-v1")
+        self.assertEqual(config.speech.audio_format, "pcm")
+        self.assertEqual(config.speech.sample_rate, 16000)
 
     def test_models_ignores_unknown_fields(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

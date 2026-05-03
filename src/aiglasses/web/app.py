@@ -14,14 +14,24 @@ from aiglasses.config import AppConfig
 from aiglasses.device import DeviceManager, clamp_target_video_fps
 from aiglasses.navigation import NavigationStateMachine
 from aiglasses.protocol import Packet
-from aiglasses.speech import SpeechHub, UiSpeechSink
+from aiglasses.speech import DashscopeTtsSpeechSink, SpeechHub, UiSpeechSink
 from aiglasses.vision import VisionPipeline
 
 
 logger = logging.getLogger("aiglasses.web")
 
 
+def validate_speech_config(config: AppConfig) -> None:
+    if not config.speech.enabled:
+        return
+    if config.speech.mode not in {"ui", "device"}:
+        raise ValueError("speech.mode must be either 'ui' or 'device'")
+    if config.speech.mode == "device" and not config.device.audio_down.enabled:
+        raise ValueError("speech.mode='device' requires device.audio_down.enabled=true")
+
+
 def create_app(config: AppConfig) -> FastAPI:
+    validate_speech_config(config)
     app = FastAPI(title=config.web.title)
     web_dir = Path(__file__).resolve().parent
     static_dir = web_dir / "static"
@@ -36,6 +46,18 @@ def create_app(config: AppConfig) -> FastAPI:
         target_video_fps=clamp_target_video_fps(config.device.capture.video_fps),
     )
     speech.add_sink(UiSpeechSink(manager.broadcast))
+    if config.speech.enabled and config.speech.mode == "device":
+        speech.add_sink(
+            DashscopeTtsSpeechSink(
+                config.speech,
+                api_key=config.asr.dashscope_api_key,
+                send_pcm16=manager.send_speech_pcm16,
+                sample_rate=config.device.capture.audio_sample_rate,
+                broadcast=manager.broadcast,
+                websocket_base_url=config.asr.websocket_base_url,
+                http_base_url=config.asr.http_base_url,
+            )
+        )
     asr = AsrService(config.asr, lambda text: manager.handle_command_text(text, source="asr"))
 
     app.state.config = config
