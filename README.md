@@ -7,7 +7,7 @@
 - Seeed XIAO ESP32S3 Sense 固件，使用 PlatformIO。
 - Python 后端使用 `uv` 管理。
 - ESP32 通过 WebSocket 上传 JPEG 视频、PCM16 音频、ICM42688 IMU。
-- 后端使用 NCNN 模型目录做盲道/斑马线、障碍物、红绿灯推理。
+- 后端使用 PyTorch/Ultralytics 模型做盲道/斑马线、障碍物、红绿灯推理。
 - Web 调试台显示实时画面、检测状态、IMU、ASR/指令和“应播报内容”。
 - TTS 与设备音频下行已预留接口，默认不播放、不下发。
 
@@ -31,15 +31,31 @@ cp config.example.toml config.toml
   - `asr.dashscope_api_key`：DashScope API Key
   - `asr.websocket_base_url`：实时 ASR WebSocket 地址
   - `asr.http_base_url`：DashScope HTTP API 地址
-- NCNN 模型路径
+- Torch 模型路径、输入尺寸和推理设备
 - TTS/音频下行开关
 
 ## 运行后端
 
 ```bash
 uv sync
+uv pip install --torch-backend auto torch torchvision ultralytics
 uv run python -m aiglasses.server --config config.toml
 ```
+
+AMD ROCm 环境可显式指定后端，例如本机 MI50/MI60：
+
+```bash
+uv sync
+uv pip install --torch-backend rocm6.3 torch torchvision ultralytics
+```
+
+Torch、TorchVision 和 Ultralytics 不写入 `pyproject.toml`，避免 `uv sync`/lockfile 固定错误的 CUDA 或 ROCm wheel。每次重新 `uv sync` 后，如果 runtime 包被清掉，需要重新执行上面的 `uv pip install --torch-backend ...`。确认 ROCm 可用：
+
+```bash
+uv run python -c "import torch; print(torch.__version__, torch.version.hip, torch.cuda.is_available())"
+```
+
+ROCm 在 PyTorch 里也通过 `torch.cuda` 接口暴露。
 
 默认 Web 控制台：
 
@@ -75,37 +91,41 @@ uv run pio remote device monitor -b 115200
 
 ## 模型
 
-运行时只接受 NCNN 模型目录，不加载 `.pt`：
+视觉推理只使用 Torch/Ultralytics 模型。盲道/斑马线和红绿灯直接使用 `.pt`，
+障碍物使用离线固化过类别提示词的 YOLOE `.pt`：
 
 ```text
-models/yolo-seg_ncnn_model
-models/yoloe-11l-seg_ncnn_model
-models/trafficlight_ncnn_model
+models/yolo-seg.pt
+models/yoloe-11l-seg-obstacle.pt
+models/trafficlight.pt
 ```
 
-每个目录需要包含：
+原始 YOLOE 模型 `models/yoloe-11l-seg.pt` 是开放词表模型，不能直接当作障碍物模型运行。
+先用固定的 29 个障碍物类别导出固化模型：
 
-```text
-model.ncnn.param
-model.ncnn.bin
-metadata.yaml
+```bash
+uv run python -m aiglasses.vision.export_yoloe_obstacle \
+  --source models/yoloe-11l-seg.pt \
+  --output models/yoloe-11l-seg-obstacle.pt
 ```
 
-`config.toml` 的 `[models]` 决定运行时使用的模型目录、输入尺寸和 NCNN 设备：
+这一步会生成文本 embedding 并写入输出 `.pt`。后端运行 `models/yoloe-11l-seg-obstacle.pt`
+时不需要 CLIP/MobileCLIP encoder，也不会再下载 encoder 权重。
+
+`config.toml` 的 `[models]` 决定模型路径、输入尺寸和 Torch 设备：
 
 ```toml
 [models]
-blind_path = "models/yolo-seg_ncnn_model"
-obstacle = "models/yoloe-11l-seg_ncnn_model"
-traffic_light = "models/trafficlight_ncnn_model"
+blind_path = "models/yolo-seg.pt"
+obstacle = "models/yoloe-11l-seg-obstacle.pt"
+traffic_light = "models/trafficlight.pt"
 image_width = 640
 image_height = 480
-ncnn_device = "vulkan"
-# 可选；取消注释后可固定 Vulkan 设备编号；保持注释时使用 ncnn 默认设备
-# ncnn_device_index = 1
+torch_device = "cuda:0"
+torch_half = true
 ```
 
-`ncnn_device = "vulkan"` 会启用 NCNN Vulkan 推理；当前 NCNN 默认启用 `fp16_storage`、`fp16_packed` 和 `fp16_arithmetic`。多 Vulkan 设备时，取消注释 `ncnn_device_index` 可指定设备编号；不写这个键时使用 ncnn 默认设备。可用 benchmark 的 `--device` 和 `--device-index` 临时覆盖。
+`torch_device = "cuda:0"` 会使用 PyTorch CUDA/ROCm 设备，`torch_half = true` 会使用 FP16 推理。没有可用 GPU 时可临时设为 `torch_device = "cpu"`、`torch_half = false`，但速度会明显下降。ROCm 设备在 PyTorch 中仍通过 `cuda:0`、`cuda:1` 这类名称选择。
 
 ### 模型 Benchmark
 
@@ -141,25 +161,26 @@ uv run aiglasses-model-benchmark --config config.toml --model traffic_light
 uv run aiglasses-model-benchmark --config config.toml --image test-frame.jpg
 ```
 
-临时切换 NCNN 设备：
+临时切换 Torch 设备或精度：
 
 ```bash
-uv run aiglasses-model-benchmark --config config.toml --device vulkan
-uv run aiglasses-model-benchmark --config config.toml --device vulkan --device-index 1
-uv run aiglasses-model-benchmark --config config.toml --device cpu
+uv run aiglasses-model-benchmark --config config.toml --torch-device cuda:0 --torch-half
+uv run aiglasses-model-benchmark --config config.toml --torch-device cpu --no-torch-half
 ```
 
 输出字段示例：
 
 ```text
-initial_load traffic_light: 799.74ms detections=0 masks=0
-warmup_serial: min=25.45ms p50=25.45ms mean=25.45ms p90=25.45ms p95=25.45ms max=25.45ms
-traffic_light: min=24.00ms p50=24.00ms mean=24.00ms p90=24.00ms p95=24.00ms max=24.00ms
-all_serial: min=90.07ms p50=91.41ms mean=91.54ms p90=92.19ms p95=92.76ms max=94.82ms
-effective_serial_fps_p50=10.94
+runtime=torch
+torch_device=cuda:0
+torch_half=True
+initial_load traffic_light: 824.81ms detections=0 masks=0
+traffic_light: min=12.27ms p50=12.37ms mean=12.40ms p90=12.49ms p95=12.71ms max=12.75ms
+all_serial: min=46.47ms p50=46.67ms mean=46.75ms p90=47.07ms p95=47.36ms max=47.43ms
+effective_serial_fps_p50=21.43
 ```
 
-看稳定性能时优先看 `p50`、`p90`、`p95`。`initial_load` 包含模型加载和 Vulkan 初始化，不代表持续推理耗时。`all_serial` 接近后端当前串行推理一帧的耗时。
+看稳定性能时优先看 `p50`、`p90`、`p95`。`initial_load` 包含模型加载和运行时初始化，不代表持续推理耗时。`all_serial` 接近后端当前串行推理一帧的耗时。
 
 ## 测试
 

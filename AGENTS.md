@@ -7,14 +7,16 @@ This repository contains a Python backend and ESP32 firmware for AI glasses.
 - `src/aiglasses/`: Python package. Key areas include `web/`, `vision/`, `device/`, `navigation/`, `asr/`, and `config/`.
 - `tests/`: Python unit tests, named `test_*.py`.
 - `firmware/`: PlatformIO project for the Seeed XIAO ESP32S3. Firmware source lives in `firmware/src/`; generated headers live in `firmware/include/`.
-- `models/`: Local NCNN model directories. Avoid committing large/private artifacts.
+- `models/`: Local model files/directories. Avoid committing large/private artifacts.
 - `voice/`: Local speech/audio assets.
 
 ## Build, Test, and Development Commands
 
 - `uv sync`: Install Python dependencies.
+- `uv pip install --torch-backend rocm6.3 torch torchvision ultralytics`: Install the local Torch runtime on this ROCm host. Use `auto` instead of `rocm6.3` on generic machines.
+- `uv run python -m aiglasses.vision.export_yoloe_obstacle --source models/yoloe-11l-seg.pt --output models/yoloe-11l-seg-obstacle.pt`: Precompute and save the fixed 29-class YOLOE obstacle model. Runtime config should point to the exported model, not the raw open-vocabulary YOLOE `.pt`.
 - `uv run python -m aiglasses.server --config config.toml`: Run the backend and web console.
-- `uv run aiglasses-model-benchmark --config config.toml`: Benchmark configured NCNN models.
+- `uv run aiglasses-model-benchmark --config config.toml`: Benchmark configured vision models.
 - `uv run aiglasses-model-benchmark --config config.toml --warmup-rounds 15 --runs 100`: Measure stable latency.
 - `uv run python -m aiglasses.config.firmware_header --config config.toml`: Generate `firmware/include/generated_config.h`.
 - `uv run pio run -d firmware`: Build ESP32 firmware.
