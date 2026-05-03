@@ -143,8 +143,9 @@ function drawOverlay() {
   colorOverlay(blind, "#2f9c67", "blind path");
   colorOverlay(crosswalk, "#e4572e", "crosswalk");
 
-  ctx.strokeStyle = "#f0b429";
-  ctx.fillStyle = "#f0b429";
+  ctx.strokeStyle = "#ffff00";
+  ctx.fillStyle = "#ffff00";
+  ctx.lineWidth = 3;
   obstacles.slice(0, 6).forEach((obs) => {
     const [x1, y1, x2, y2] = obs.box || [0, 0, 0, 0];
     const sx = rect.width / 640;
