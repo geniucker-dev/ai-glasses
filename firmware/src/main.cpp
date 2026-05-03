@@ -1,6 +1,7 @@
 #include <Arduino.h>
 #include <ArduinoWebsockets.h>
 #include <WiFi.h>
+#include <ctype.h>
 #include <esp_camera.h>
 #include <esp_heap_caps.h>
 #include <esp_wifi.h>
@@ -22,6 +23,7 @@ static constexpr int IMU_SPI_MISO = 1;
 static constexpr int IMU_SPI_MOSI = 2;
 static constexpr int IMU_SPI_SCK = 3;
 static constexpr int IMU_SPI_CS = 4;
+static constexpr int MAX_TARGET_VIDEO_FPS = 1000;
 
 static constexpr int AUDIO_BYTES_PER_CHUNK = AGL_AUDIO_SAMPLE_RATE * AGL_AUDIO_CHUNK_MS / 1000 * 2;
 static constexpr size_t PACKET_HEADER_SIZE = sizeof(PacketHeader);
@@ -39,6 +41,7 @@ volatile bool controlReady = false;
 volatile bool videoReady = false;
 volatile bool audioReady = false;
 volatile bool helloPending = false;
+volatile int targetVideoFps = min(MAX_TARGET_VIDEO_FPS, max(1, AGL_VIDEO_FPS));
 uint64_t seqControl = 0;
 uint64_t seqVideo = 0;
 uint64_t seqAudio = 0;
@@ -175,10 +178,56 @@ bool send_hello() {
   return send_packet(wsControl, controlMutex, PKT_HELLO, seqControl, (const uint8_t*)payload.c_str(), payload.length());
 }
 
+bool read_json_int(const String& payload, const char* key, int& value) {
+  String needle = String("\"") + key + "\"";
+  int keyPos = payload.indexOf(needle);
+  if (keyPos < 0) return false;
+  int colonPos = payload.indexOf(':', keyPos + needle.length());
+  if (colonPos < 0) return false;
+
+  int pos = colonPos + 1;
+  while (pos < payload.length() && isspace((unsigned char)payload[pos])) pos++;
+  bool negative = false;
+  if (pos < payload.length() && payload[pos] == '-') {
+    negative = true;
+    pos++;
+  }
+
+  long parsed = 0;
+  bool hasDigit = false;
+  while (pos < payload.length() && isdigit((unsigned char)payload[pos])) {
+    parsed = parsed * 10 + (payload[pos] - '0');
+    hasDigit = true;
+    pos++;
+  }
+  if (!hasDigit) return false;
+  value = negative ? -parsed : parsed;
+  return true;
+}
+
+int clamp_video_fps(int fps) {
+  return min(MAX_TARGET_VIDEO_FPS, max(1, fps));
+}
+
+void handle_control_message(const String& payload) {
+  int fps = 0;
+  if (!read_json_int(payload, "target_fps", fps) && !read_json_int(payload, "video_fps", fps)) {
+    return;
+  }
+  targetVideoFps = clamp_video_fps(fps);
+  Serial.printf("[CFG] target_fps=%d\n", targetVideoFps);
+}
+
+uint32_t current_frame_period_ms() {
+  int fps = clamp_video_fps(targetVideoFps);
+  uint32_t period = 1000 / fps;
+  return period > 0 ? period : 1;
+}
+
 void task_camera(void*) {
-  const uint32_t framePeriod = 1000 / max(1, AGL_VIDEO_FPS);
   uint32_t lastFrame = 0;
   for (;;) {
+    uint32_t framePeriod = current_frame_period_ms();
     if (!videoReady || millis() - lastFrame < framePeriod) {
       vTaskDelay(pdMS_TO_TICKS(5));
       continue;
@@ -280,6 +329,9 @@ void connect_wifi() {
 }
 
 void setup_ws_handlers() {
+  wsControl.onMessage([](WebsocketsMessage message) {
+    handle_control_message(message.data());
+  });
   wsControl.onEvent([](WebsocketsEvent ev, String) {
     if (ev == WebsocketsEvent::ConnectionOpened) {
       controlReady = true;

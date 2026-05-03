@@ -169,7 +169,7 @@ h2 {
 
 .side {
   display: grid;
-  grid-template-rows: auto minmax(220px, 1fr) minmax(220px, 0.9fr);
+  grid-template-rows: auto auto minmax(220px, 1fr) minmax(220px, 0.9fr);
   gap: 18px;
   min-height: 0;
   overflow: hidden;
@@ -194,6 +194,24 @@ form {
   display: grid;
   grid-template-columns: 1fr 84px;
   gap: 8px;
+}
+
+.config-form {
+  grid-template-columns: minmax(84px, auto) minmax(0, 1fr) 84px;
+  align-items: center;
+}
+
+.config-form label {
+  color: var(--muted);
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.config-status {
+  min-height: 18px;
+  margin-top: 10px;
+  color: var(--muted);
+  font-size: 12px;
 }
 
 input,

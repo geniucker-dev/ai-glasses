@@ -5,13 +5,13 @@ import logging
 from pathlib import Path
 from typing import Annotated
 
-from fastapi import Body, FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import Body, FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from aiglasses.asr import AsrService
 from aiglasses.config import AppConfig
-from aiglasses.device import DeviceManager
+from aiglasses.device import DeviceManager, clamp_target_video_fps
 from aiglasses.navigation import NavigationStateMachine
 from aiglasses.protocol import Packet
 from aiglasses.speech import SpeechHub, UiSpeechSink
@@ -29,7 +29,12 @@ def create_app(config: AppConfig) -> FastAPI:
 
     speech = SpeechHub()
     navigation = NavigationStateMachine()
-    manager = DeviceManager(VisionPipeline(config), navigation, speech)
+    manager = DeviceManager(
+        VisionPipeline(config),
+        navigation,
+        speech,
+        target_video_fps=clamp_target_video_fps(config.device.capture.video_fps),
+    )
     speech.add_sink(UiSpeechSink(manager.broadcast))
     asr = AsrService(config.asr, lambda text: manager.handle_command_text(text, source="asr"))
 
@@ -74,6 +79,21 @@ def create_app(config: AppConfig) -> FastAPI:
         text = str(payload.get("text", ""))
         return await manager.handle_command_text(text, source="debug")
 
+    @app.get("/api/v1/device/config")
+    async def device_config() -> dict:
+        return manager.device_config_payload()
+
+    @app.post("/api/v1/device/config")
+    async def update_device_config(payload: Annotated[dict, Body()]) -> dict:
+        raw_fps = payload.get("target_fps", payload.get("video_fps"))
+        if raw_fps is None:
+            raise HTTPException(status_code=400, detail="target_fps is required")
+        try:
+            target_fps = int(raw_fps)
+        except (TypeError, ValueError) as exc:
+            raise HTTPException(status_code=400, detail="target_fps must be an integer") from exc
+        return await manager.update_device_config(target_fps=target_fps)
+
     @app.websocket("/ws/ui")
     async def ws_ui(ws: WebSocket) -> None:
         await ws.accept()
@@ -91,6 +111,7 @@ def create_app(config: AppConfig) -> FastAPI:
         await ws.accept()
         manager.control_ws = ws
         await manager.broadcast({"kind": "device", "channel": "control", "connected": True})
+        await manager.sync_device_config()
         try:
             while True:
                 data = await ws.receive_bytes()

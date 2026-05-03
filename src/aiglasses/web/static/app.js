@@ -9,6 +9,8 @@ const fpsEl = document.querySelector("#fps");
 const uptimeEl = document.querySelector("#uptime");
 const lightEl = document.querySelector("#light");
 const imuBriefEl = document.querySelector("#imuBrief");
+const targetFpsEl = document.querySelector("#targetFps");
+const configStatusEl = document.querySelector("#configStatus");
 const chips = {
   control: document.querySelector("#control"),
   video: document.querySelector("#video"),
@@ -21,6 +23,10 @@ let latestObservation = null;
 let frameCount = 0;
 let asrStatus = "unknown";
 let audioConnected = false;
+let pendingFrameCount = 0;
+const displayedFrameTimes = [];
+const displayFpsWindowMs = 3000;
+const maxTargetFps = 1000;
 
 function hasOwn(object, key) {
   return Object.prototype.hasOwnProperty.call(object, key);
@@ -72,10 +78,26 @@ function addLog(kind, text, source = "") {
   while (logEl.children.length > 80) logEl.lastChild.remove();
 }
 
+function renderStateJson() {
+  stateEl.textContent = JSON.stringify(latestState, null, 2);
+}
+
+function renderDeviceConfig(config, sent = null) {
+  if (!config) return;
+  latestState = mergeState(latestState, { device_config: config });
+  if (Number.isFinite(Number(config.target_fps))) {
+    targetFpsEl.value = String(config.target_fps);
+  }
+  const suffix = sent === null ? "" : sent ? "sent" : "pending";
+  configStatusEl.textContent = suffix ? `target ${config.target_fps} fps · ${suffix}` : `target ${config.target_fps} fps`;
+  renderStateJson();
+}
+
 function renderState(snapshot) {
   const incoming = snapshot || {};
   latestState = mergeState(latestState, incoming);
-  stateEl.textContent = JSON.stringify(latestState, null, 2);
+  if (incoming.device_config) renderDeviceConfig(incoming.device_config);
+  renderStateJson();
   const device = latestState.device || {};
   setChip("control", device.control);
   setChip("video", device.video);
@@ -85,7 +107,6 @@ function renderState(snapshot) {
     setAsrStatus(latestState.asr);
   }
   modeEl.textContent = latestState.navigation?.mode || "idle";
-  fpsEl.textContent = String(latestState.frame_count || frameCount || 0);
   uptimeEl.textContent = `${latestState.uptime_s || 0}s`;
   if (latestState.imu?.accel) {
     const a = latestState.imu.accel;
@@ -167,19 +188,81 @@ function drawOverlay() {
   }
 }
 
+function pruneDisplayedFrames(now = performance.now()) {
+  while (displayedFrameTimes.length && now - displayedFrameTimes[0] > displayFpsWindowMs) {
+    displayedFrameTimes.shift();
+  }
+}
+
+function renderDisplayFps(now = performance.now()) {
+  pruneDisplayedFrames(now);
+  if (displayedFrameTimes.length < 2) {
+    fpsEl.textContent = "0.0";
+    return;
+  }
+  const elapsedMs = displayedFrameTimes[displayedFrameTimes.length - 1] - displayedFrameTimes[0];
+  const fps = elapsedMs > 0 ? ((displayedFrameTimes.length - 1) * 1000) / elapsedMs : 0;
+  fpsEl.textContent = fps.toFixed(1);
+}
+
+function recordDisplayedFrame() {
+  if (pendingFrameCount === frameCount) return;
+  frameCount = pendingFrameCount;
+  const now = performance.now();
+  displayedFrameTimes.push(now);
+  renderDisplayFps(now);
+}
+
+async function loadDeviceConfig() {
+  try {
+    const res = await fetch("/api/v1/device/config", { cache: "no-store" });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    renderDeviceConfig(await res.json());
+  } catch {
+    configStatusEl.textContent = "config unavailable";
+  }
+}
+
+async function saveDeviceConfig(event) {
+  event.preventDefault();
+  const targetFps = Number.parseInt(targetFpsEl.value, 10);
+  if (!Number.isFinite(targetFps) || targetFps < 1) {
+    configStatusEl.textContent = "target fps must be >= 1";
+    return;
+  }
+  if (targetFps > maxTargetFps) {
+    configStatusEl.textContent = `target fps must be <= ${maxTargetFps}`;
+    return;
+  }
+
+  configStatusEl.textContent = "updating";
+  try {
+    const res = await fetch("/api/v1/device/config", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ target_fps: targetFps }),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.detail || `HTTP ${res.status}`);
+    renderDeviceConfig(data.config, data.sent);
+  } catch (error) {
+    configStatusEl.textContent = error.message || "update failed";
+  }
+}
+
 async function refreshFrame() {
   try {
     const res = await fetch("/api/v1/frame", { cache: "no-store" });
     const data = await res.json();
-    if (data.frame && data.frame_count !== frameCount) {
-      frameCount = data.frame_count;
+    if (data.frame && data.frame_count !== frameCount && data.frame_count !== pendingFrameCount) {
+      pendingFrameCount = data.frame_count;
       frameEl.src = data.frame;
       emptyEl.style.display = "none";
-      fpsEl.textContent = String(frameCount);
     }
   } catch {
     // UI polling should stay quiet during backend restarts.
   } finally {
+    renderDisplayFps();
     window.setTimeout(refreshFrame, 160);
   }
 }
@@ -190,6 +273,7 @@ function connectUi() {
   ws.onmessage = (event) => {
     const msg = JSON.parse(event.data);
     if (msg.kind === "snapshot") renderState(msg.state);
+    if (msg.kind === "device_config") renderDeviceConfig(msg.config, msg.sent);
     if (msg.kind === "asr") setAsrStatus(msg.status);
     if (msg.kind === "speech") addLog("speech", msg.text, msg.source);
     if (msg.kind === "command") addLog("command", msg.text, msg.source);
@@ -220,5 +304,8 @@ function connectUi() {
 }
 
 window.addEventListener("resize", drawOverlay);
+frameEl.addEventListener("load", recordDisplayedFrame);
+document.querySelector("#deviceConfigForm").addEventListener("submit", saveDeviceConfig);
 connectUi();
+loadDeviceConfig();
 refreshFrame();

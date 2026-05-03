@@ -14,6 +14,12 @@ from aiglasses.protocol import Packet, PacketType, ProtocolError
 from aiglasses.speech import SpeechHub
 from aiglasses.vision import FrameAnalysis, VisionPipeline
 
+MAX_TARGET_VIDEO_FPS = 1000
+
+
+def clamp_target_video_fps(value: int) -> int:
+    return min(MAX_TARGET_VIDEO_FPS, max(1, int(value)))
+
 
 @dataclass
 class UiClient:
@@ -32,6 +38,7 @@ class DeviceManager:
     last_frame_jpeg: bytes | None = None
     last_analysis: FrameAnalysis | None = None
     last_imu: dict[str, Any] | None = None
+    target_video_fps: int = 1
     frame_count: int = 0
     audio_bytes: int = 0
     started_at: float = field(default_factory=time.time)
@@ -70,6 +77,39 @@ class DeviceManager:
         if result.speech:
             await self.speech.say(result.speech, source="command")
         return event
+
+    def device_config_payload(self) -> dict[str, Any]:
+        return {"kind": "config", "target_fps": clamp_target_video_fps(self.target_video_fps)}
+
+    async def send_device_config(self) -> bool:
+        ws = self.control_ws
+        if ws is None:
+            return False
+        try:
+            await ws.send_text(json.dumps(self.device_config_payload(), ensure_ascii=False))
+            return True
+        except Exception:
+            if self.control_ws is ws:
+                self.control_ws = None
+                await self.broadcast(
+                    {"kind": "device", "channel": "control", "connected": False}
+                )
+            return False
+
+    async def update_device_config(self, *, target_fps: int) -> dict[str, Any]:
+        self.target_video_fps = clamp_target_video_fps(target_fps)
+        sent = await self.send_device_config()
+        config = self.device_config_payload()
+        await self.broadcast({"kind": "device_config", "config": config, "sent": sent})
+        return {"config": config, "sent": sent}
+
+    async def sync_device_config(self) -> bool:
+        sent = await self.send_device_config()
+        if sent:
+            await self.broadcast(
+                {"kind": "device_config", "config": self.device_config_payload(), "sent": True}
+            )
+        return sent
 
     async def handle_control_packet(self, packet: Packet) -> None:
         if packet.packet_type == PacketType.IMU_JSON:
@@ -124,6 +164,7 @@ class DeviceManager:
             },
             "frame_count": self.frame_count,
             "audio_bytes": self.audio_bytes,
+            "device_config": self.device_config_payload(),
             "navigation": self.navigation.snapshot(),
             "imu": self.last_imu,
             "model_status": self.vision.model_status,

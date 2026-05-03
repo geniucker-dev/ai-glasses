@@ -29,7 +29,7 @@
         </div>
 
         <div class="metrics">
-          <div><b id="fps">0</b><span>frames</span></div>
+          <div><b id="fps">0.0</b><span>display fps</span></div>
           <div><b id="uptime">0s</b><span>uptime</span></div>
           <div><b id="light">--</b><span>traffic</span></div>
           <div><b id="imuBrief">--</b><span>imu</span></div>
@@ -42,6 +42,16 @@
             <input id="commandInput" type="text" placeholder="输入调试指令，例如：开始导航" autocomplete="off" />
             <button type="submit">Send</button>
           </form>
+        </section>
+
+        <section class="panel config-panel">
+          <h2>设备</h2>
+          <form id="deviceConfigForm" class="config-form">
+            <label for="targetFps">目标帧率</label>
+            <input id="targetFps" type="number" min="1" max="1000" step="1" inputmode="numeric" />
+            <button type="submit">Apply</button>
+          </form>
+          <p id="configStatus" class="config-status">--</p>
         </section>
 
         <section class="panel log-panel">
