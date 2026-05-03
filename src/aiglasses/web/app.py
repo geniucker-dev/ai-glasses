@@ -14,7 +14,7 @@ from aiglasses.config import AppConfig
 from aiglasses.device import DeviceManager, clamp_target_video_fps
 from aiglasses.navigation import NavigationStateMachine
 from aiglasses.protocol import Packet
-from aiglasses.speech import DashscopeTtsSpeechSink, SpeechHub, UiSpeechSink
+from aiglasses.speech import DashscopeTtsSpeechSink, LocalTtsSpeechSink, SpeechHub, UiSpeechSink
 from aiglasses.vision import VisionPipeline
 
 
@@ -28,6 +28,8 @@ def validate_speech_config(config: AppConfig) -> None:
         raise ValueError("speech.mode must be either 'ui' or 'device'")
     if config.speech.mode == "device" and not config.device.audio_down.enabled:
         raise ValueError("speech.mode='device' requires device.audio_down.enabled=true")
+    if config.speech.mode == "device" and config.speech.provider not in {"dashscope", "local"}:
+        raise ValueError("speech.provider must be either 'dashscope' or 'local'")
 
 
 def create_app(config: AppConfig) -> FastAPI:
@@ -47,8 +49,8 @@ def create_app(config: AppConfig) -> FastAPI:
     )
     speech.add_sink(UiSpeechSink(manager.broadcast))
     if config.speech.enabled and config.speech.mode == "device":
-        speech.add_sink(
-            DashscopeTtsSpeechSink(
+        if config.speech.provider == "dashscope":
+            tts_sink = DashscopeTtsSpeechSink(
                 config.speech,
                 api_key=config.asr.dashscope_api_key,
                 send_pcm16=manager.send_speech_pcm16,
@@ -57,7 +59,14 @@ def create_app(config: AppConfig) -> FastAPI:
                 websocket_base_url=config.asr.websocket_base_url,
                 http_base_url=config.asr.http_base_url,
             )
-        )
+        else:
+            tts_sink = LocalTtsSpeechSink(
+                config.speech,
+                send_pcm16=manager.send_speech_pcm16,
+                sample_rate=config.device.capture.audio_sample_rate,
+                broadcast=manager.broadcast,
+            )
+        speech.add_sink(tts_sink)
     asr = AsrService(config.asr, lambda text: manager.handle_command_text(text, source="asr"))
 
     app.state.config = config

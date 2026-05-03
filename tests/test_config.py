@@ -17,6 +17,11 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(config.speech.model, "sambert-zhichu-v1")
         self.assertEqual(config.speech.audio_format, "pcm")
         self.assertEqual(config.speech.sample_rate, 16000)
+        self.assertEqual(config.speech.language, "auto")
+        self.assertEqual(config.speech.piper_model_dir, "voice")
+        self.assertEqual(config.speech.piper_voice_zh, "zh_CN-huayan-medium")
+        self.assertEqual(config.speech.piper_voice_en, "en_US-lessac-medium")
+        self.assertFalse(config.speech.piper_use_cuda)
 
     def test_models_ignores_unknown_fields(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

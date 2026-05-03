@@ -41,6 +41,25 @@ class WebAppTests(unittest.TestCase):
 
         validate_speech_config(config)
 
+    def test_device_speech_allows_local_provider(self) -> None:
+        config = AppConfig(
+            path=Path("config.toml"),
+            speech=SpeechConfig(enabled=True, mode="device", provider="local"),
+            device=DeviceConfig(audio_down=DeviceAudioDownConfig(enabled=True)),
+        )
+
+        validate_speech_config(config)
+
+    def test_device_speech_rejects_unknown_provider(self) -> None:
+        config = AppConfig(
+            path=Path("config.toml"),
+            speech=SpeechConfig(enabled=True, mode="device", provider="unknown"),
+            device=DeviceConfig(audio_down=DeviceAudioDownConfig(enabled=True)),
+        )
+
+        with self.assertRaisesRegex(ValueError, "speech.provider"):
+            validate_speech_config(config)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -9,7 +9,7 @@
 - ESP32 通过 WebSocket 上传 JPEG 视频、PCM16 音频、ICM42688 IMU。
 - 后端使用 PyTorch/Ultralytics 模型做盲道/斑马线、障碍物、红绿灯推理。
 - Web 调试台显示实时画面、检测状态、IMU、ASR/指令和“应播报内容”。
-- TTS 与设备音频下行已预留接口，默认不播放、不下发。
+- TTS 支持 UI 文字播报和设备音频下行，可选择 DashScope API 或本地 TTS。
 
 ## 配置
 
@@ -32,7 +32,88 @@ cp config.example.toml config.toml
   - `asr.websocket_base_url`：实时 ASR WebSocket 地址
   - `asr.http_base_url`：DashScope HTTP API 地址
 - Torch 模型路径、输入尺寸和推理设备
-- TTS/音频下行开关
+- TTS/音频下行开关：
+  - `speech.mode = "ui"`：只在 Web 调试台显示应播报内容
+  - `speech.mode = "device"`：同时把 TTS PCM16 下发到设备，需开启 `device.audio_down.enabled`
+  - `speech.provider = "dashscope"`：使用 DashScope API
+  - `speech.provider = "local"`：使用 Piper 本地 TTS，支持中英文 voice 自动切换
+
+## TTS 与设备播报
+
+后端始终会把导航或指令产生的播报文字发到 Web 调试台。是否让眼镜设备播放声音由
+`speech.enabled`、`speech.mode` 和 `device.audio_down.enabled` 决定：
+
+```toml
+[device.audio_down]
+enabled = true
+
+[speech]
+enabled = true
+mode = "device"
+```
+
+`speech.mode` 只有两个有效值：
+
+- `ui`：只在 Web 调试台显示播报文字，不合成音频，也不下发到设备。
+- `device`：合成 TTS，并通过控制 WebSocket 把 mono PCM16 音频下发给 ESP32 播放。
+
+设备播放需要重新生成固件配置并上传，因为 `device.audio_down.enabled` 会写入
+`firmware/include/generated_config.h`：
+
+```bash
+uv run python -m aiglasses.config.firmware_header --config config.toml
+uv run pio run -d firmware
+uv run pio remote run -d firmware -e seeed_xiao_esp32s3 -t upload
+```
+
+### DashScope TTS
+
+使用 DashScope API 时：
+
+```toml
+[asr]
+dashscope_api_key = "your-dashscope-api-key"
+
+[speech]
+enabled = true
+mode = "device"
+provider = "dashscope"
+model = "sambert-zhichu-v1"
+```
+
+DashScope TTS 输出采样率会跟随 `device.capture.audio_sample_rate`，保持和 ESP32 I2S
+播放采样率一致。`speech.sample_rate` 保留在配置里，但设备播放路径不会用它决定下发采样率。
+
+### Piper 本地 TTS
+
+使用 Piper 本地 TTS 时：
+
+```toml
+[speech]
+enabled = true
+mode = "device"
+provider = "local"
+language = "auto"
+piper_model_dir = "voice"
+piper_voice_zh = "zh_CN-huayan-medium"
+piper_voice_en = "en_US-lessac-medium"
+piper_use_cuda = false
+```
+
+本地实现使用 `piper-tts` Python 包加载 voice 模型生成 WAV，再由后端转成设备需要的
+mono PCM16。`language = "auto"` 会按文本里的中英文字符分段，中文段使用 `piper_voice_zh`，
+英文段使用 `piper_voice_en`。如果只想固定一种语言，可设为 `zh-CN` 或 `en-US`。
+
+首次使用前需要安装 Python 依赖并下载 voice 模型：
+
+```bash
+uv sync
+uv run python -m piper.download_voices --download-dir voice zh_CN-huayan-medium
+uv run python -m piper.download_voices --download-dir voice en_US-lessac-medium
+```
+
+下载后 `voice/` 目录里每个 voice 应该各有一个 `.onnx` 和一个 `.onnx.json` 文件。
+`piper_voice_zh`、`piper_voice_en` 可以写 voice 名称，也可以写 `.onnx` 模型文件路径。
 
 ## 运行后端
 

@@ -50,13 +50,17 @@ language = "zh-CN"
 enabled = false
 mode = "ui"
 provider = "dashscope"
+language = "auto"
 model = "sambert-zhichu-v1"
 audio_format = "pcm"
 sample_rate = 16000
 volume = 50
 rate = 1.0
 pitch = 1.0
-voice_dir = "voice"
+piper_model_dir = "voice"
+piper_voice_zh = "zh_CN-huayan-medium"
+piper_voice_en = "en_US-lessac-medium"
+piper_use_cuda = false
 
 [web]
 title = "AI Glasses Console"

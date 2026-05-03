@@ -77,13 +77,17 @@ class SpeechConfig:
     enabled: bool = False
     mode: str = "ui"
     provider: str = "dashscope"
+    language: str = "auto"
     model: str = "sambert-zhichu-v1"
     audio_format: str = "pcm"
     sample_rate: int = 16000
     volume: int = 50
     rate: float = 1.0
     pitch: float = 1.0
-    voice_dir: str = "voice"
+    piper_model_dir: str = "voice"
+    piper_voice_zh: str = "zh_CN-huayan-medium"
+    piper_voice_en: str = "en_US-lessac-medium"
+    piper_use_cuda: bool = False
 
 
 @dataclass(frozen=True)
