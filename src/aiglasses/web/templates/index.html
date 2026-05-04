@@ -4,7 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>AI Glasses Console</title>
-    <link rel="stylesheet" href="/static/styles.css?v=20260504-even-metrics" />
+    <link rel="stylesheet" href="/static/styles.css?v=20260504-device-disconnect" />
   </head>
   <body>
     <main class="shell">
@@ -53,6 +53,7 @@
             <input id="targetFps" type="number" min="1" max="1000" step="1" inputmode="numeric" />
             <button type="submit">Apply</button>
           </form>
+          <button id="disconnectDevice" class="danger-button" type="button">断开设备连接</button>
           <p id="configStatus" class="config-status">--</p>
         </section>
 
@@ -67,6 +68,6 @@
         </section>
       </aside>
     </main>
-    <script src="/static/app.js?v=20260504-even-metrics" type="module"></script>
+    <script src="/static/app.js?v=20260504-device-disconnect" type="module"></script>
   </body>
 </html>

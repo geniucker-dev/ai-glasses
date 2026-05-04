@@ -87,6 +87,62 @@ class DeviceManager:
         for ws in dead:
             self.ui_clients.discard(ws)
 
+    async def replace_device_ws(self, channel: str, ws: WebSocket) -> None:
+        previous = self._device_ws(channel)
+        if previous is ws:
+            return
+        if previous is not None:
+            await self._close_ws(previous)
+        self._set_device_ws(channel, ws)
+
+    async def disconnect_device(self) -> dict[str, Any]:
+        channels = {
+            "control": self.control_ws,
+            "video": self.video_ws,
+            "audio": self.audio_ws,
+        }
+        disconnected: list[str] = []
+        for channel, ws in channels.items():
+            if ws is None:
+                continue
+            self._set_device_ws(channel, None)
+            await self._close_ws(ws)
+            disconnected.append(channel)
+            await self.broadcast({"kind": "device", "channel": channel, "connected": False})
+        return {"disconnected": disconnected, "state": self.snapshot()}
+
+    def clear_device_ws(self, channel: str, ws: WebSocket) -> bool:
+        if self._device_ws(channel) is not ws:
+            return False
+        self._set_device_ws(channel, None)
+        return True
+
+    def _device_ws(self, channel: str) -> WebSocket | None:
+        if channel == "control":
+            return self.control_ws
+        if channel == "video":
+            return self.video_ws
+        if channel == "audio":
+            return self.audio_ws
+        raise ValueError(f"unknown device channel: {channel}")
+
+    def _set_device_ws(self, channel: str, ws: WebSocket | None) -> None:
+        if channel == "control":
+            self.control_ws = ws
+        elif channel == "video":
+            self.video_ws = ws
+        elif channel == "audio":
+            self.audio_ws = ws
+        else:
+            raise ValueError(f"unknown device channel: {channel}")
+
+    @staticmethod
+    async def _close_ws(ws: WebSocket) -> None:
+        try:
+            await ws.close(code=1012)
+        except Exception:
+            pass
+
     async def handle_command_text(self, text: str, *, source: str = "debug") -> dict[str, Any]:
         result = self.navigation.command(text)
         event = {

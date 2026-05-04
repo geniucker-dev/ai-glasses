@@ -31,6 +31,23 @@ class WebAppTests(unittest.TestCase):
         self.assertEqual(response.headers["x-frame-count"], "12")
         self.assertEqual(response.content, b"\xff\xd8jpeg\xff\xd9")
 
+    def test_disconnect_device_endpoint_returns_disconnect_result(self) -> None:
+        from aiglasses.web.app import create_app
+
+        app = create_app(AppConfig(path=Path("config.toml"), asr=AsrConfig(enabled=False)))
+        app.state.manager.benchmark_processing_capacity = lambda: {"status": "ready"}
+
+        async def disconnect_device() -> dict:
+            return {"disconnected": ["control"], "state": {}}
+
+        app.state.manager.disconnect_device = disconnect_device
+
+        with TestClient(app) as client:
+            response = client.post("/api/v1/device/disconnect")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json(), {"disconnected": ["control"], "state": {}})
+
     def test_device_speech_requires_audio_down(self) -> None:
         config = AppConfig(
             path=Path("config.toml"),

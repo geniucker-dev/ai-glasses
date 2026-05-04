@@ -281,6 +281,18 @@ button {
   font-weight: 700;
 }
 
+button:disabled {
+  cursor: wait;
+  opacity: 0.58;
+}
+
+.danger-button {
+  width: 100%;
+  margin-top: 10px;
+  border-color: rgba(176, 53, 42, 0.42);
+  background: #b0352a;
+}
+
 .log {
   display: flex;
   flex-direction: column;

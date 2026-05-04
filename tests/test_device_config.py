@@ -15,12 +15,18 @@ class FakeWebSocket:
     def __init__(self) -> None:
         self.messages: list[str] = []
         self.bytes_messages: list[bytes] = []
+        self.closed: bool = False
+        self.close_code: int | None = None
 
     async def send_text(self, text: str) -> None:
         self.messages.append(text)
 
     async def send_bytes(self, data: bytes) -> None:
         self.bytes_messages.append(data)
+
+    async def close(self, code: int = 1000) -> None:
+        self.closed = True
+        self.close_code = code
 
 
 class FailingWebSocket:
@@ -132,6 +138,45 @@ class DeviceConfigTests(unittest.TestCase):
             json.loads(ui_ws.messages[-1]),
             {"kind": "device_config", "config": {"kind": "config", "target_fps": 6}, "sent": True},
         )
+
+    def test_replace_device_ws_closes_previous_channel_connection(self) -> None:
+        manager = DeviceManager(
+            vision=object(),
+            navigation=NavigationStateMachine(),
+            speech=SpeechHub(),
+        )
+        old_ws = FakeWebSocket()
+        new_ws = FakeWebSocket()
+        manager.control_ws = old_ws
+
+        asyncio.run(manager.replace_device_ws("control", new_ws))
+
+        self.assertIs(manager.control_ws, new_ws)
+        self.assertTrue(old_ws.closed)
+        self.assertEqual(old_ws.close_code, 1012)
+
+    def test_disconnect_device_closes_all_device_websockets(self) -> None:
+        manager = DeviceManager(
+            vision=FakeVision(),
+            navigation=NavigationStateMachine(),
+            speech=SpeechHub(),
+        )
+        control_ws = FakeWebSocket()
+        video_ws = FakeWebSocket()
+        audio_ws = FakeWebSocket()
+        manager.control_ws = control_ws
+        manager.video_ws = video_ws
+        manager.audio_ws = audio_ws
+
+        result = asyncio.run(manager.disconnect_device())
+
+        self.assertEqual(result["disconnected"], ["control", "video", "audio"])
+        self.assertIsNone(manager.control_ws)
+        self.assertIsNone(manager.video_ws)
+        self.assertIsNone(manager.audio_ws)
+        self.assertTrue(control_ws.closed)
+        self.assertTrue(video_ws.closed)
+        self.assertTrue(audio_ws.closed)
 
     def test_send_speech_pcm16_packets_control_websocket(self) -> None:
         manager = DeviceManager(

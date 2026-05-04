@@ -13,6 +13,7 @@ const lightEl = document.querySelector("#light");
 const imuBriefEl = document.querySelector("#imuBrief");
 const targetFpsEl = document.querySelector("#targetFps");
 const configStatusEl = document.querySelector("#configStatus");
+const disconnectDeviceButton = document.querySelector("#disconnectDevice");
 const chips = {
   control: document.querySelector("#control"),
   video: document.querySelector("#video"),
@@ -312,6 +313,25 @@ async function saveDeviceConfig(event) {
   }
 }
 
+async function disconnectDevice() {
+  disconnectDeviceButton.disabled = true;
+  configStatusEl.textContent = "disconnecting device";
+  try {
+    const res = await fetch("/api/v1/device/disconnect", { method: "POST" });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.detail || `HTTP ${res.status}`);
+    renderState(data.state);
+    const channels = data.disconnected || [];
+    configStatusEl.textContent = channels.length
+      ? `disconnected ${channels.join(", ")}`
+      : "no device connections";
+  } catch (error) {
+    configStatusEl.textContent = error.message || "disconnect failed";
+  } finally {
+    disconnectDeviceButton.disabled = false;
+  }
+}
+
 function requestFrame(nextFrameCount) {
   const next = Number.parseInt(nextFrameCount, 10);
   if (!Number.isFinite(next) || next <= frameCount || next <= pendingFrameCount) return;
@@ -462,6 +482,7 @@ window.addEventListener("resize", drawOverlay);
 frameEl.addEventListener("load", recordDisplayedFrame);
 frameEl.addEventListener("error", handleFrameError);
 document.querySelector("#deviceConfigForm").addEventListener("submit", saveDeviceConfig);
+disconnectDeviceButton.addEventListener("click", disconnectDevice);
 connectUi();
 loadDeviceConfig();
 refreshFrameFallback();

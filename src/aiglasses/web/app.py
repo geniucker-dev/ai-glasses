@@ -148,6 +148,10 @@ def create_app(config: AppConfig) -> FastAPI:
             raise HTTPException(status_code=400, detail="target_fps must be an integer") from exc
         return await manager.update_device_config(target_fps=target_fps)
 
+    @app.post("/api/v1/device/disconnect")
+    async def disconnect_device() -> dict:
+        return await manager.disconnect_device()
+
     @app.websocket("/ws/ui")
     async def ws_ui(ws: WebSocket) -> None:
         await ws.accept()
@@ -163,7 +167,7 @@ def create_app(config: AppConfig) -> FastAPI:
     @app.websocket("/ws/device/control")
     async def ws_device_control(ws: WebSocket) -> None:
         await ws.accept()
-        manager.control_ws = ws
+        await manager.replace_device_ws("control", ws)
         await manager.broadcast({"kind": "device", "channel": "control", "connected": True})
         await manager.sync_device_config()
         try:
@@ -176,8 +180,7 @@ def create_app(config: AppConfig) -> FastAPI:
             logger.exception("device control websocket failed")
             await manager.broadcast({"kind": "device_error", "channel": "control", "error": str(exc)})
         finally:
-            if manager.control_ws is ws:
-                manager.control_ws = None
+            if manager.clear_device_ws("control", ws):
                 await manager.broadcast(
                     {"kind": "device", "channel": "control", "connected": False}
                 )
@@ -185,7 +188,7 @@ def create_app(config: AppConfig) -> FastAPI:
     @app.websocket("/ws/device/video")
     async def ws_device_video(ws: WebSocket) -> None:
         await ws.accept()
-        manager.video_ws = ws
+        await manager.replace_device_ws("video", ws)
         await manager.broadcast({"kind": "device", "channel": "video", "connected": True})
         try:
             while True:
@@ -205,8 +208,7 @@ def create_app(config: AppConfig) -> FastAPI:
             logger.exception("device video websocket failed")
             await manager.broadcast({"kind": "device_error", "channel": "video", "error": str(exc)})
         finally:
-            if manager.video_ws is ws:
-                manager.video_ws = None
+            if manager.clear_device_ws("video", ws):
                 await manager.broadcast(
                     {"kind": "device", "channel": "video", "connected": False}
                 )
@@ -214,7 +216,7 @@ def create_app(config: AppConfig) -> FastAPI:
     @app.websocket("/ws/device/audio-up")
     async def ws_device_audio(ws: WebSocket) -> None:
         await ws.accept()
-        manager.audio_ws = ws
+        await manager.replace_device_ws("audio", ws)
         await manager.broadcast({"kind": "device", "channel": "audio", "connected": True})
         try:
             while True:
@@ -228,8 +230,7 @@ def create_app(config: AppConfig) -> FastAPI:
             logger.exception("device audio websocket failed")
             await manager.broadcast({"kind": "device_error", "channel": "audio", "error": str(exc)})
         finally:
-            if manager.audio_ws is ws:
-                manager.audio_ws = None
+            if manager.clear_device_ws("audio", ws):
                 await manager.broadcast(
                     {"kind": "device", "channel": "audio", "connected": False}
                 )
