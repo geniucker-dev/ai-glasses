@@ -16,11 +16,36 @@ class NavigationTests(unittest.TestCase):
         result = nav.process_observation({"nearest_obstacle": {"label": "车"}})
         self.assertEqual(result.speech, "前方有车，停一下。")
 
+    def test_guidance_translates_english_obstacle_label(self) -> None:
+        nav = NavigationStateMachine()
+        nav.command("开始导航")
+        result = nav.process_observation({"nearest_obstacle": {"label": "utility pole"}})
+        self.assertEqual(result.speech, "前方有电线杆，停一下。")
+
     def test_stop_navigation(self) -> None:
         nav = NavigationStateMachine()
         nav.command("开始过马路")
         result = nav.command("停止过马路")
         self.assertEqual(result.mode, NavigationMode.IDLE)
+        self.assertEqual(result.speech, "过马路模式已停止。")
+
+    def test_generic_stop_uses_current_navigation_mode(self) -> None:
+        nav = NavigationStateMachine()
+        nav.command("开始导航")
+
+        result = nav.command("停止检测")
+
+        self.assertEqual(result.mode, NavigationMode.IDLE)
+        self.assertEqual(result.speech, "盲道导航已停止。")
+
+    def test_generic_stop_uses_current_traffic_light_mode(self) -> None:
+        nav = NavigationStateMachine()
+        nav.command("检测红绿灯")
+
+        result = nav.command("停止检测")
+
+        self.assertEqual(result.mode, NavigationMode.IDLE)
+        self.assertEqual(result.speech, "红绿灯检测已停止。")
 
     def test_detection_loss_guidance_requires_stable_frames(self) -> None:
         nav = NavigationStateMachine()

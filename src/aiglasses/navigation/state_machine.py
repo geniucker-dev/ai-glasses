@@ -13,6 +13,39 @@ class NavigationMode(StrEnum):
     TRAFFIC_LIGHT = "traffic_light"
 
 
+OBSTACLE_SPEECH_LABELS = {
+    "bicycle": "自行车",
+    "car": "车",
+    "motorcycle": "摩托车",
+    "bus": "公交车",
+    "truck": "卡车",
+    "animal": "动物",
+    "scooter": "滑板车",
+    "stroller": "婴儿车",
+    "dog": "狗",
+    "pole": "杆子",
+    "post": "柱子",
+    "column": "柱子",
+    "pillar": "柱子",
+    "stanchion": "立柱",
+    "bollard": "路桩",
+    "utility pole": "电线杆",
+    "telegraph pole": "电线杆",
+    "light pole": "灯杆",
+    "street pole": "路灯杆",
+    "signpost": "标志杆",
+    "support post": "支撑柱",
+    "vertical post": "立柱",
+    "bench": "长椅",
+    "chair": "椅子",
+    "potted plant": "盆栽",
+    "hydrant": "消防栓",
+    "cone": "锥桶",
+    "stone": "石头",
+    "box": "箱子",
+}
+
+
 @dataclass(frozen=True)
 class NavigationResult:
     mode: NavigationMode
@@ -38,25 +71,19 @@ class NavigationStateMachine:
             self._reset_guidance_debounce()
             speech = "过马路模式已启动。"
         elif any(k in normalized for k in ("过马路结束", "结束过马路", "停止过马路", "取消过马路")):
-            self.mode = NavigationMode.IDLE
-            self._reset_guidance_debounce()
-            speech = "已停止导航。"
+            speech = self._stop_current_mode()
         elif any(k in normalized for k in ("检测红绿灯", "看红绿灯")):
             self.mode = NavigationMode.TRAFFIC_LIGHT
             self._reset_guidance_debounce()
             speech = "红绿灯检测已启动。"
         elif any(k in normalized for k in ("停止检测", "取消检测", "停止红绿灯", "取消红绿灯")):
-            self.mode = NavigationMode.IDLE
-            self._reset_guidance_debounce()
-            speech = "红绿灯检测已停止。"
+            speech = self._stop_current_mode()
         elif any(k in normalized for k in ("开始导航", "盲道导航", "帮我导航")):
             self.mode = NavigationMode.BLIND_PATH
             self._reset_guidance_debounce()
             speech = "盲道导航已启动。"
         elif any(k in normalized for k in ("停止导航", "结束导航", "取消导航")):
-            self.mode = NavigationMode.IDLE
-            self._reset_guidance_debounce()
-            speech = "已停止导航。"
+            speech = self._stop_current_mode()
         elif any(k in normalized for k in ("继续", "立即通过", "现在通过")):
             speech = "收到。"
         return NavigationResult(self.mode, speech=speech, state=self.snapshot())
@@ -118,6 +145,20 @@ class NavigationStateMachine:
         self._candidate_frames = 0
         self._last_guidance_spoken_at = None
 
+    def _stop_current_mode(self) -> str:
+        mode_to_stop = self.mode
+        if mode_to_stop == NavigationMode.TRAFFIC_LIGHT:
+            speech = "红绿灯检测已停止。"
+        elif mode_to_stop == NavigationMode.CROSSING:
+            speech = "过马路模式已停止。"
+        elif mode_to_stop == NavigationMode.BLIND_PATH:
+            speech = "盲道导航已停止。"
+        else:
+            speech = "当前没有正在进行的检测。"
+        self.mode = NavigationMode.IDLE
+        self._reset_guidance_debounce()
+        return speech
+
     @staticmethod
     def _is_detection_loss_speech(speech: str) -> bool:
         return speech.startswith("没看到")
@@ -134,7 +175,7 @@ class NavigationStateMachine:
     def _blind_path_guidance(self, obs: dict[str, Any]) -> str | None:
         obstacle = obs.get("nearest_obstacle")
         if obstacle:
-            return f"前方有{obstacle.get('label', '障碍物')}，停一下。"
+            return f"前方有{self._obstacle_speech_label(obstacle)}，停一下。"
         blind = obs.get("blind_path")
         if not blind:
             return "没看到盲道，请原地小幅转动。"
@@ -149,6 +190,11 @@ class NavigationStateMachine:
         if angle > 12:
             return "请向右转动。"
         return "保持直行。"
+
+    @staticmethod
+    def _obstacle_speech_label(obstacle: dict[str, Any]) -> str:
+        label = str(obstacle.get("label") or "").strip()
+        return OBSTACLE_SPEECH_LABELS.get(label, label or "障碍物")
 
     def _crossing_guidance(self, obs: dict[str, Any]) -> str | None:
         crosswalk = obs.get("crosswalk")
