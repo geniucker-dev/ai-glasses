@@ -273,7 +273,8 @@ void task_camera(void*) {
   uint32_t lastFrame = 0;
   for (;;) {
     uint32_t framePeriod = current_frame_period_ms();
-    if (!videoReady || millis() - lastFrame < framePeriod) {
+    uint32_t now = millis();
+    if (!videoReady || (lastFrame != 0 && now - lastFrame < framePeriod)) {
       vTaskDelay(pdMS_TO_TICKS(5));
       continue;
     }
@@ -282,9 +283,9 @@ void task_camera(void*) {
       vTaskDelay(pdMS_TO_TICKS(10));
       continue;
     }
+    lastFrame = now;
     if (fb->format == PIXFORMAT_JPEG) {
       send_packet(wsVideo, videoMutex, PKT_VIDEO_JPEG, seqVideo, fb->buf, fb->len);
-      lastFrame = millis();
     }
     esp_camera_fb_return(fb);
   }
