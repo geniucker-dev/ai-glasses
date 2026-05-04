@@ -35,6 +35,10 @@ Firmware is Arduino C++ under PlatformIO. Use existing `AGL_*` generated macros 
 
 Use `unittest` for Python tests. Add tests under `tests/` with filenames like `test_config.py` or `test_benchmark.py`. Prefer focused tests that avoid hardware, GPU, network, and external ASR dependencies. For firmware config changes, test generated header text and run `uv run pio run -d firmware`.
 
+## Runtime Behavior
+
+Backend startup is expected to block until vision models are warmed up and the startup processing-capacity benchmark completes. This is intentional so the web console reports warm-model capacity and the first live device frames do not pay cold-start inference cost.
+
 ## Commit & Pull Request Guidelines
 
 Use Conventional Commits v1.0.0: `<type>[optional scope]: <description>`. Prefer lowercase types such as `feat`, `fix`, `docs`, `test`, `refactor`, `perf`, `build`, `ci`, and `chore`. Examples: `feat(vision): add model benchmark CLI`, `fix(web): preserve ASR status`, `docs: update contributor guide`. Mark breaking changes with `!` or a `BREAKING CHANGE:` footer.
