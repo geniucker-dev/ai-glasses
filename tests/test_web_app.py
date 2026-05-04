@@ -19,6 +19,7 @@ class WebAppTests(unittest.TestCase):
         from aiglasses.web.app import create_app
 
         app = create_app(AppConfig(path=Path("config.toml"), asr=AsrConfig(enabled=False)))
+        app.state.manager.benchmark_processing_capacity = lambda: {"status": "ready"}
         app.state.manager.last_frame_jpeg = b"\xff\xd8jpeg\xff\xd9"
         app.state.manager.frame_count = 12
 

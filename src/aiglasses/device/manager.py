@@ -2,11 +2,14 @@ from __future__ import annotations
 
 import asyncio
 import json
+import statistics
 import time
 from dataclasses import dataclass, field
 from typing import Any
 
+import cv2
 from fastapi import WebSocket
+import numpy as np
 from starlette.websockets import WebSocketState
 
 from aiglasses.navigation import NavigationStateMachine
@@ -15,6 +18,7 @@ from aiglasses.speech import SpeechHub
 from aiglasses.vision import FrameAnalysis, VisionPipeline
 
 MAX_TARGET_VIDEO_FPS = 1000
+BENCHMARK_JPEG_QUALITY = 85
 
 
 def clamp_target_video_fps(value: int) -> int:
@@ -45,6 +49,9 @@ class DeviceManager:
     started_at: float = field(default_factory=time.time)
     frame_received_at: list[float] = field(default_factory=list)
     analysis_elapsed_ms: list[float] = field(default_factory=list)
+    backend_benchmark: dict[str, Any] = field(
+        default_factory=lambda: {"status": "pending"}
+    )
 
     async def add_ui(self, ws: WebSocket) -> None:
         self.ui_clients.add(ws)
@@ -238,6 +245,74 @@ class DeviceManager:
             "avg_analysis_ms": round(avg_analysis_ms, 1) if avg_analysis_ms is not None else None,
         }
 
+    def benchmark_processing_capacity(
+        self,
+        *,
+        warmup_runs: int = 5,
+        measured_runs: int = 20,
+        seed: int = 20260504,
+    ) -> dict[str, Any]:
+        if warmup_runs < 0:
+            raise ValueError("warmup_runs cannot be negative")
+        if measured_runs <= 0:
+            raise ValueError("measured_runs must be positive")
+
+        self.backend_benchmark = {
+            "status": "running",
+            "warmup_runs": warmup_runs,
+            "measured_runs": measured_runs,
+        }
+        payload = self._benchmark_jpeg_payload(seed)
+        started = time.perf_counter()
+
+        for _ in range(warmup_runs):
+            self.vision.analyze_jpeg(payload)
+
+        samples = [self._time_analysis(payload) for _ in range(measured_runs)]
+        elapsed_ms = (time.perf_counter() - started) * 1000
+        ordered = sorted(samples)
+        p50_ms = statistics.median(ordered)
+        mean_ms = statistics.mean(ordered)
+        p90_ms = ordered[round((len(ordered) - 1) * 0.90)]
+        p95_ms = ordered[round((len(ordered) - 1) * 0.95)]
+        self.backend_benchmark = {
+            "status": "ready",
+            "warmup_runs": warmup_runs,
+            "measured_runs": measured_runs,
+            "image_width": self.vision.config.models.image_width,
+            "image_height": self.vision.config.models.image_height,
+            "min_ms": round(min(ordered), 1),
+            "p50_ms": round(p50_ms, 1),
+            "mean_ms": round(mean_ms, 1),
+            "p90_ms": round(p90_ms, 1),
+            "p95_ms": round(p95_ms, 1),
+            "max_ms": round(max(ordered), 1),
+            "fps_p50": round(1000 / p50_ms, 2) if p50_ms > 0 else None,
+            "fps_mean": round(1000 / mean_ms, 2) if mean_ms > 0 else None,
+            "elapsed_ms": round(elapsed_ms, 1),
+            "created_at": time.time(),
+        }
+        return self.backend_benchmark
+
+    def _benchmark_jpeg_payload(self, seed: int) -> bytes:
+        width = self.vision.config.models.image_width
+        height = self.vision.config.models.image_height
+        rng = np.random.default_rng(seed)
+        frame = rng.integers(0, 256, (height, width, 3), dtype=np.uint8)
+        ok, encoded = cv2.imencode(
+            ".jpg",
+            frame,
+            [int(cv2.IMWRITE_JPEG_QUALITY), BENCHMARK_JPEG_QUALITY],
+        )
+        if not ok:
+            raise ValueError("failed to encode benchmark frame")
+        return encoded.tobytes()
+
+    def _time_analysis(self, payload: bytes) -> float:
+        started = time.perf_counter()
+        self.vision.analyze_jpeg(payload)
+        return (time.perf_counter() - started) * 1000
+
     async def handle_audio_packet(self, packet: Packet) -> None:
         if packet.packet_type != PacketType.AUDIO_PCM16:
             raise ProtocolError(f"unexpected packet on audio channel: {packet.packet_type}")
@@ -260,4 +335,5 @@ class DeviceManager:
             "imu": self.last_imu,
             "model_status": self.vision.model_status,
             "video_stats": self.video_stats(),
+            "backend_benchmark": self.backend_benchmark,
         }

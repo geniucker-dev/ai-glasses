@@ -1,4 +1,5 @@
 import asyncio
+from dataclasses import dataclass
 import json
 import unittest
 
@@ -31,7 +32,19 @@ class FakeUiWebSocket(FakeWebSocket):
     client_state = WebSocketState.CONNECTED
 
 
+@dataclass(frozen=True)
+class FakeModelsConfig:
+    image_width: int = 16
+    image_height: int = 12
+
+
+@dataclass(frozen=True)
+class FakeConfig:
+    models: FakeModelsConfig = FakeModelsConfig()
+
+
 class FakeVision:
+    config = FakeConfig()
     model_status: dict[str, str] = {}
 
     def analyze_jpeg(self, payload: bytes) -> FrameAnalysis:
@@ -165,6 +178,24 @@ class DeviceConfigTests(unittest.TestCase):
         self.assertEqual(message["kind"], "frame")
         self.assertEqual(message["frame_count"], 1)
         self.assertIn("received_fps_3s", message["video_stats"])
+
+    def test_processing_benchmark_uses_analyze_jpeg_path(self) -> None:
+        vision = FakeVision()
+        manager = DeviceManager(
+            vision=vision,
+            navigation=NavigationStateMachine(),
+            speech=SpeechHub(),
+        )
+
+        result = manager.benchmark_processing_capacity(warmup_runs=2, measured_runs=3)
+
+        self.assertEqual(result["status"], "ready")
+        self.assertEqual(result["warmup_runs"], 2)
+        self.assertEqual(result["measured_runs"], 3)
+        self.assertEqual(result["image_width"], 16)
+        self.assertEqual(result["image_height"], 12)
+        self.assertGreater(result["fps_p50"], 0)
+        self.assertEqual(manager.backend_benchmark, result)
 
 
 if __name__ == "__main__":

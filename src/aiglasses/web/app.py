@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import base64
 import logging
 from pathlib import Path
@@ -75,6 +76,15 @@ def create_app(config: AppConfig) -> FastAPI:
 
     @app.on_event("startup")
     async def startup() -> None:
+        try:
+            benchmark = await asyncio.to_thread(manager.benchmark_processing_capacity)
+            logger.info("backend processing benchmark: %s", benchmark)
+        except Exception as exc:
+            logger.exception("backend processing benchmark failed")
+            manager.backend_benchmark = {
+                "status": "failed",
+                "error": str(exc),
+            }
         await asr.start()
 
     @app.on_event("shutdown")
