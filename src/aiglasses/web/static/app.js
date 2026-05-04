@@ -6,6 +6,7 @@ const overlay = document.querySelector("#overlay");
 const ctx = overlay.getContext("2d");
 const modeEl = document.querySelector("#mode");
 const fpsEl = document.querySelector("#fps");
+const backendFpsEl = document.querySelector("#backendFps");
 const uptimeEl = document.querySelector("#uptime");
 const lightEl = document.querySelector("#light");
 const imuBriefEl = document.querySelector("#imuBrief");
@@ -24,9 +25,16 @@ let frameCount = 0;
 let asrStatus = "unknown";
 let audioConnected = false;
 let pendingFrameCount = 0;
+let queuedFrameCount = 0;
+let queuedFrameBlob = null;
+let frameLoading = false;
+let frameObjectUrl = "";
+let lastWsFrameAt = 0;
 const displayedFrameTimes = [];
 const displayFpsWindowMs = 3000;
 const maxTargetFps = 1000;
+const packetHeaderBytes = 32;
+const packetTypeVideoJpeg = 2;
 
 function hasOwn(object, key) {
   return Object.prototype.hasOwnProperty.call(object, key);
@@ -93,6 +101,11 @@ function renderDeviceConfig(config, sent = null) {
   renderStateJson();
 }
 
+function renderBackendFps(stats) {
+  const backendFps = Number(stats?.received_fps_3s);
+  backendFpsEl.textContent = Number.isFinite(backendFps) ? backendFps.toFixed(1) : "0.0";
+}
+
 function renderState(snapshot) {
   const incoming = snapshot || {};
   latestState = mergeState(latestState, incoming);
@@ -108,6 +121,7 @@ function renderState(snapshot) {
   }
   modeEl.textContent = latestState.navigation?.mode || "idle";
   uptimeEl.textContent = `${latestState.uptime_s || 0}s`;
+  if (hasOwn(incoming, "video_stats")) renderBackendFps(incoming.video_stats);
   if (latestState.imu?.accel) {
     const a = latestState.imu.accel;
     imuBriefEl.textContent = `${Number(a.x).toFixed(1)}, ${Number(a.y).toFixed(1)}, ${Number(a.z).toFixed(1)}`;
@@ -206,11 +220,35 @@ function renderDisplayFps(now = performance.now()) {
 }
 
 function recordDisplayedFrame() {
-  if (pendingFrameCount === frameCount) return;
-  frameCount = pendingFrameCount;
+  const loadedFrameCount = Number.parseInt(frameEl.dataset.frameCount || "0", 10);
+  if (!Number.isFinite(loadedFrameCount) || loadedFrameCount <= frameCount) {
+    frameLoading = false;
+    showQueuedFrame();
+    return;
+  }
+  frameCount = loadedFrameCount;
+  frameLoading = false;
   const now = performance.now();
   displayedFrameTimes.push(now);
   renderDisplayFps(now);
+  showQueuedFrame();
+}
+
+function handleFrameError() {
+  frameLoading = false;
+  pendingFrameCount = frameCount;
+  showQueuedFrame();
+}
+
+function showQueuedFrame() {
+  if (!queuedFrameCount || queuedFrameCount <= frameCount) return;
+  if (queuedFrameBlob) {
+    const frame = queuedFrameBlob;
+    queuedFrameBlob = null;
+    showFrameBlob(frame.frameCount, frame.blob);
+    return;
+  }
+  requestFrame(queuedFrameCount);
 }
 
 async function loadDeviceConfig() {
@@ -250,31 +288,124 @@ async function saveDeviceConfig(event) {
   }
 }
 
-async function refreshFrame() {
+function requestFrame(nextFrameCount) {
+  const next = Number.parseInt(nextFrameCount, 10);
+  if (!Number.isFinite(next) || next <= frameCount || next <= pendingFrameCount) return;
+  if (frameLoading) {
+    queuedFrameCount = Math.max(queuedFrameCount, next);
+    queuedFrameBlob = null;
+    return;
+  }
+  frameLoading = true;
+  pendingFrameCount = next;
+  queuedFrameCount = 0;
+  loadFrameImage(next);
+}
+
+function showFrameBlob(nextFrameCount, blob) {
+  const next = Number.parseInt(nextFrameCount, 10);
+  if (!Number.isFinite(next) || next <= frameCount || next <= pendingFrameCount) return;
+  if (frameLoading) {
+    if (next > queuedFrameCount) {
+      queuedFrameCount = next;
+      queuedFrameBlob = { frameCount: next, blob };
+    }
+    return;
+  }
+  frameLoading = true;
+  pendingFrameCount = next;
+  queuedFrameCount = 0;
+  const url = URL.createObjectURL(blob);
+  if (frameObjectUrl) URL.revokeObjectURL(frameObjectUrl);
+  frameObjectUrl = url;
+  frameEl.dataset.frameCount = String(next);
+  frameEl.src = url;
+  emptyEl.style.display = "none";
+}
+
+function unpackVideoFrame(data) {
+  if (!(data instanceof ArrayBuffer) || data.byteLength < packetHeaderBytes) return null;
+  const view = new DataView(data);
+  const magic =
+    String.fromCharCode(view.getUint8(0)) +
+    String.fromCharCode(view.getUint8(1)) +
+    String.fromCharCode(view.getUint8(2)) +
+    String.fromCharCode(view.getUint8(3));
+  if (magic !== "AGL1") return null;
+  const packetType = view.getUint8(5);
+  if (packetType !== packetTypeVideoJpeg) return null;
+  const seq = Number(view.getBigUint64(8, true));
+  const payloadLength = view.getUint32(24, true);
+  const payloadStart = packetHeaderBytes;
+  const payloadEnd = payloadStart + payloadLength;
+  if (payloadEnd !== data.byteLength) return null;
+  return {
+    frameCount: seq,
+    blob: new Blob([data.slice(payloadStart, payloadEnd)], { type: "image/jpeg" }),
+  };
+}
+
+async function loadFrameImage(requestedFrameCount) {
   try {
+    const res = await fetch(`/api/v1/frame.jpg?frame_count=${requestedFrameCount}&t=${Date.now()}`, {
+      cache: "no-store",
+    });
+    if (res.status === 204) {
+      handleFrameError();
+      return;
+    }
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const responseFrameCount = Number.parseInt(res.headers.get("x-frame-count") || "", 10);
+    const loadedFrameCount = Number.isFinite(responseFrameCount)
+      ? responseFrameCount
+      : requestedFrameCount;
+    const blob = await res.blob();
+    frameLoading = false;
+    pendingFrameCount = frameCount;
+    showFrameBlob(loadedFrameCount, blob);
+  } catch {
+    handleFrameError();
+  }
+}
+
+async function refreshFrameFallback() {
+  try {
+    if (performance.now() - lastWsFrameAt < 2500) return;
     const res = await fetch("/api/v1/frame", { cache: "no-store" });
     const data = await res.json();
-    if (data.frame && data.frame_count !== frameCount && data.frame_count !== pendingFrameCount) {
-      pendingFrameCount = data.frame_count;
-      frameEl.src = data.frame;
-      emptyEl.style.display = "none";
-    }
+    if (data.frame) requestFrame(data.frame_count);
   } catch {
     // UI polling should stay quiet during backend restarts.
   } finally {
     renderDisplayFps();
-    window.setTimeout(refreshFrame, 160);
+    window.setTimeout(refreshFrameFallback, 1000);
   }
 }
 
 function connectUi() {
   const proto = location.protocol === "https:" ? "wss" : "ws";
   const ws = new WebSocket(`${proto}://${location.host}/ws/ui`);
+  ws.binaryType = "arraybuffer";
   ws.onmessage = (event) => {
+    if (event.data instanceof ArrayBuffer) {
+      const frame = unpackVideoFrame(event.data);
+      if (frame) {
+        lastWsFrameAt = performance.now();
+        showFrameBlob(frame.frameCount, frame.blob);
+      }
+      return;
+    }
     const msg = JSON.parse(event.data);
     if (msg.kind === "snapshot") renderState(msg.state);
     if (msg.kind === "device_config") renderDeviceConfig(msg.config, msg.sent);
     if (msg.kind === "asr") setAsrStatus(msg.status);
+    if (msg.kind === "frame") {
+      latestState = mergeState(latestState, {
+        frame_count: msg.frame_count,
+        video_stats: msg.video_stats,
+      });
+      renderBackendFps(msg.video_stats);
+    }
     if (msg.kind === "speech") addLog("speech", msg.text, msg.source);
     if (msg.kind === "command") addLog("command", msg.text, msg.source);
     if (msg.kind === "analysis") {
@@ -305,7 +436,8 @@ function connectUi() {
 
 window.addEventListener("resize", drawOverlay);
 frameEl.addEventListener("load", recordDisplayedFrame);
+frameEl.addEventListener("error", handleFrameError);
 document.querySelector("#deviceConfigForm").addEventListener("submit", saveDeviceConfig);
 connectUi();
 loadDeviceConfig();
-refreshFrame();
+refreshFrameFallback();

@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Annotated
 
 from fastapi import Body, FastAPI, HTTPException, WebSocket, WebSocketDisconnect
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 
 from aiglasses.asr import AsrService
@@ -103,6 +103,19 @@ def create_app(config: AppConfig) -> FastAPI:
                 "frame": f"data:image/jpeg;base64,{encoded}",
                 "frame_count": manager.frame_count,
             }
+        )
+
+    @app.get("/api/v1/frame.jpg")
+    async def frame_jpeg() -> Response:
+        if manager.last_frame_jpeg is None:
+            return Response(status_code=204, headers={"cache-control": "no-store"})
+        return Response(
+            manager.last_frame_jpeg,
+            media_type="image/jpeg",
+            headers={
+                "cache-control": "no-store",
+                "x-frame-count": str(manager.frame_count),
+            },
         )
 
     @app.post("/api/v1/commands")

@@ -1,7 +1,10 @@
 import unittest
 from pathlib import Path
 
+from fastapi.testclient import TestClient
+
 from aiglasses.config import AppConfig, SpeechConfig
+from aiglasses.config.settings import AsrConfig
 from aiglasses.config.settings import DeviceAudioDownConfig, DeviceConfig
 from aiglasses.web.app import validate_speech_config
 
@@ -11,6 +14,21 @@ class WebAppTests(unittest.TestCase):
         from aiglasses.web.app import create_app
 
         self.assertTrue(callable(create_app))
+
+    def test_frame_jpeg_endpoint_returns_latest_frame_bytes(self) -> None:
+        from aiglasses.web.app import create_app
+
+        app = create_app(AppConfig(path=Path("config.toml"), asr=AsrConfig(enabled=False)))
+        app.state.manager.last_frame_jpeg = b"\xff\xd8jpeg\xff\xd9"
+        app.state.manager.frame_count = 12
+
+        with TestClient(app) as client:
+            response = client.get("/api/v1/frame.jpg")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.headers["content-type"], "image/jpeg")
+        self.assertEqual(response.headers["x-frame-count"], "12")
+        self.assertEqual(response.content, b"\xff\xd8jpeg\xff\xd9")
 
     def test_device_speech_requires_audio_down(self) -> None:
         config = AppConfig(

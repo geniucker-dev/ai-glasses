@@ -43,6 +43,8 @@ class DeviceManager:
     audio_bytes: int = 0
     speech_seq: int = 0
     started_at: float = field(default_factory=time.time)
+    frame_received_at: list[float] = field(default_factory=list)
+    analysis_elapsed_ms: list[float] = field(default_factory=list)
 
     async def add_ui(self, ws: WebSocket) -> None:
         self.ui_clients.add(ws)
@@ -60,6 +62,19 @@ class DeviceManager:
                 continue
             try:
                 await ws.send_text(text)
+            except Exception:
+                dead.append(ws)
+        for ws in dead:
+            self.ui_clients.discard(ws)
+
+    async def broadcast_bytes(self, data: bytes) -> None:
+        dead: list[WebSocket] = []
+        for ws in list(self.ui_clients):
+            if ws.client_state != WebSocketState.CONNECTED:
+                dead.append(ws)
+                continue
+            try:
+                await ws.send_bytes(data)
             except Exception:
                 dead.append(ws)
         for ws in dead:
@@ -158,8 +173,11 @@ class DeviceManager:
             raise ProtocolError(f"unexpected packet on video channel: {packet.packet_type}")
         self.last_frame_jpeg = packet.payload
         self.frame_count += 1
+        self._record_frame_received()
         if self.frame_count % 2 == 1:
+            started = time.perf_counter()
             analysis = await asyncio.to_thread(self.vision.analyze_jpeg, packet.payload)
+            self._record_analysis_elapsed((time.perf_counter() - started) * 1000)
             self.last_analysis = analysis
             observation = analysis.to_observation()
             nav = self.navigation.process_observation(observation)
@@ -174,7 +192,51 @@ class DeviceManager:
             )
             if nav.speech:
                 await self.speech.say(nav.speech)
-        await self.broadcast({"kind": "frame", "frame_count": self.frame_count})
+        await self.broadcast_bytes(
+            Packet(
+                PacketType.VIDEO_JPEG,
+                self.frame_count,
+                int(time.time() * 1000),
+                packet.payload,
+            ).pack()
+        )
+        await self.broadcast(
+            {
+                "kind": "frame",
+                "frame_count": self.frame_count,
+                "video_stats": self.video_stats(),
+            }
+        )
+
+    def _record_frame_received(self) -> None:
+        now = time.monotonic()
+        self.frame_received_at.append(now)
+        cutoff = now - 10
+        while self.frame_received_at and self.frame_received_at[0] < cutoff:
+            self.frame_received_at.pop(0)
+
+    def _record_analysis_elapsed(self, elapsed_ms: float) -> None:
+        self.analysis_elapsed_ms.append(elapsed_ms)
+        del self.analysis_elapsed_ms[:-20]
+
+    def video_stats(self) -> dict[str, Any]:
+        now = time.monotonic()
+        recent = [item for item in self.frame_received_at if now - item <= 3]
+        fps = 0.0
+        if len(recent) >= 2:
+            elapsed = recent[-1] - recent[0]
+            fps = (len(recent) - 1) / elapsed if elapsed > 0 else 0.0
+        analysis_ms = self.analysis_elapsed_ms[-1] if self.analysis_elapsed_ms else None
+        avg_analysis_ms = (
+            sum(self.analysis_elapsed_ms) / len(self.analysis_elapsed_ms)
+            if self.analysis_elapsed_ms
+            else None
+        )
+        return {
+            "received_fps_3s": round(fps, 2),
+            "last_analysis_ms": round(analysis_ms, 1) if analysis_ms is not None else None,
+            "avg_analysis_ms": round(avg_analysis_ms, 1) if avg_analysis_ms is not None else None,
+        }
 
     async def handle_audio_packet(self, packet: Packet) -> None:
         if packet.packet_type != PacketType.AUDIO_PCM16:
@@ -197,4 +259,5 @@ class DeviceManager:
             "navigation": self.navigation.snapshot(),
             "imu": self.last_imu,
             "model_status": self.vision.model_status,
+            "video_stats": self.video_stats(),
         }

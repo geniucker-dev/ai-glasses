@@ -6,6 +6,7 @@ from aiglasses.device import DeviceManager
 from aiglasses.navigation import NavigationStateMachine
 from aiglasses.protocol import Packet, PacketType
 from aiglasses.speech import SpeechHub
+from aiglasses.vision.types import FrameAnalysis
 from starlette.websockets import WebSocketState
 
 
@@ -28,6 +29,13 @@ class FailingWebSocket:
 
 class FakeUiWebSocket(FakeWebSocket):
     client_state = WebSocketState.CONNECTED
+
+
+class FakeVision:
+    model_status: dict[str, str] = {}
+
+    def analyze_jpeg(self, payload: bytes) -> FrameAnalysis:
+        return FrameAnalysis(model_status={"fake": "ready"})
 
 
 class DeviceConfigTests(unittest.TestCase):
@@ -133,6 +141,30 @@ class DeviceConfigTests(unittest.TestCase):
         self.assertEqual(second.packet_type, PacketType.SPEECH_PCM16)
         self.assertEqual(second.seq, 1)
         self.assertEqual(second.payload, b"ef")
+
+    def test_video_packet_broadcasts_processed_frame_bytes_to_ui(self) -> None:
+        manager = DeviceManager(
+            vision=FakeVision(),
+            navigation=NavigationStateMachine(),
+            speech=SpeechHub(),
+        )
+        ui_ws = FakeUiWebSocket()
+        manager.ui_clients.add(ui_ws)
+
+        asyncio.run(
+            manager.handle_video_packet(
+                Packet(PacketType.VIDEO_JPEG, 10, 1234, b"\xff\xd8jpeg\xff\xd9")
+            )
+        )
+
+        frame_packet = Packet.unpack(ui_ws.bytes_messages[-1])
+        self.assertEqual(frame_packet.packet_type, PacketType.VIDEO_JPEG)
+        self.assertEqual(frame_packet.seq, 1)
+        self.assertEqual(frame_packet.payload, b"\xff\xd8jpeg\xff\xd9")
+        message = json.loads(ui_ws.messages[-1])
+        self.assertEqual(message["kind"], "frame")
+        self.assertEqual(message["frame_count"], 1)
+        self.assertIn("received_fps_3s", message["video_stats"])
 
 
 if __name__ == "__main__":
