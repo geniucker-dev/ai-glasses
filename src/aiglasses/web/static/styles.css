@@ -148,28 +148,68 @@ h2 {
 
 .metrics {
   display: grid;
-  grid-template-columns: repeat(5, minmax(0, 1fr));
+  grid-template-columns: repeat(12, minmax(0, 1fr));
   border-top: 1px solid var(--line);
+  background: rgba(255, 250, 240, 0.72);
 }
 
-.metrics div {
-  padding: 14px 18px;
+.metric {
+  min-width: 0;
+  padding: 12px 18px;
   border-right: 1px solid var(--line);
+  border-bottom: 1px solid var(--line);
 }
 
-.metrics div:last-child {
+.metric:nth-child(3),
+.metric:last-child {
   border-right: 0;
 }
 
-.metrics b {
-  display: block;
-  font-size: 22px;
+.metric:nth-last-child(-n + 3) {
+  border-bottom: 0;
 }
 
-.metrics span {
+.metric-primary {
+  grid-column: span 4;
+  min-height: 58px;
+}
+
+.metric-secondary {
+  grid-column: span 4;
+  min-height: 54px;
+  display: grid;
+  grid-template-columns: minmax(0, auto) minmax(0, 1fr);
+  gap: 10px;
+  align-items: baseline;
+}
+
+.metric b {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+
+.metric b {
+  font-size: 17px;
+  line-height: 1.1;
+}
+
+.metric span {
   color: var(--muted);
   font-size: 12px;
   text-transform: uppercase;
+  white-space: nowrap;
+}
+
+.metric-primary span {
+  display: block;
+  margin-top: 6px;
+}
+
+.metric-secondary span {
+  justify-self: end;
 }
 
 .side {
@@ -323,7 +363,15 @@ pre {
   }
 
   .metrics {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
+    grid-template-columns: repeat(6, minmax(0, 1fr));
+  }
+
+  .metric-primary {
+    grid-column: span 2;
+  }
+
+  .metric-secondary {
+    grid-column: span 2;
   }
 
   .log-panel {
@@ -361,8 +409,39 @@ pre {
     padding: 0 9px;
   }
 
-  .metrics div {
-    padding: 13px 16px;
+  .metric {
+    padding: 12px 14px;
+  }
+
+  .metric-primary {
+    grid-column: span 3;
+    min-height: 56px;
+  }
+
+  .metric-primary:nth-child(3) {
+    grid-column: 1 / -1;
+  }
+
+  .metric-secondary {
+    grid-column: 1 / -1;
+    min-height: 44px;
+    border-right: 0;
+  }
+
+  .metric:nth-child(2) {
+    border-right: 0;
+  }
+
+  .metric:nth-child(3) {
+    border-right: 0;
+  }
+
+  .metric:nth-last-child(-n + 3) {
+    border-bottom: 1px solid var(--line);
+  }
+
+  .metric:last-child {
+    border-bottom: 0;
   }
 
   form,

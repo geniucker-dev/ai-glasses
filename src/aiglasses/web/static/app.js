@@ -7,6 +7,7 @@ const ctx = overlay.getContext("2d");
 const modeEl = document.querySelector("#mode");
 const fpsEl = document.querySelector("#fps");
 const backendFpsEl = document.querySelector("#backendFps");
+const maxBackendFpsEl = document.querySelector("#maxBackendFps");
 const uptimeEl = document.querySelector("#uptime");
 const lightEl = document.querySelector("#light");
 const imuBriefEl = document.querySelector("#imuBrief");
@@ -106,6 +107,11 @@ function renderBackendFps(stats) {
   backendFpsEl.textContent = Number.isFinite(backendFps) ? backendFps.toFixed(1) : "0.0";
 }
 
+function renderBackendBenchmark(benchmark) {
+  const maxFps = Number(benchmark?.fps_p50);
+  maxBackendFpsEl.textContent = Number.isFinite(maxFps) ? maxFps.toFixed(1) : "--";
+}
+
 function renderState(snapshot) {
   const incoming = snapshot || {};
   latestState = mergeState(latestState, incoming);
@@ -122,6 +128,9 @@ function renderState(snapshot) {
   modeEl.textContent = latestState.navigation?.mode || "idle";
   uptimeEl.textContent = `${latestState.uptime_s || 0}s`;
   if (hasOwn(incoming, "video_stats")) renderBackendFps(incoming.video_stats);
+  if (hasOwn(incoming, "backend_benchmark")) {
+    renderBackendBenchmark(incoming.backend_benchmark);
+  }
   if (latestState.imu?.accel) {
     const a = latestState.imu.accel;
     imuBriefEl.textContent = `${Number(a.x).toFixed(1)}, ${Number(a.y).toFixed(1)}, ${Number(a.z).toFixed(1)}`;

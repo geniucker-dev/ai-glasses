@@ -4,7 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>AI Glasses Console</title>
-    <link rel="stylesheet" href="/static/styles.css" />
+    <link rel="stylesheet" href="/static/styles.css?v=20260504-even-metrics" />
   </head>
   <body>
     <main class="shell">
@@ -29,11 +29,12 @@
         </div>
 
         <div class="metrics">
-          <div><b id="backendFps">0.0</b><span>backend fps</span></div>
-          <div><b id="fps">0.0</b><span>frontend fps</span></div>
-          <div><b id="uptime">0s</b><span>uptime</span></div>
-          <div><b id="light">--</b><span>traffic</span></div>
-          <div><b id="imuBrief">--</b><span>imu</span></div>
+          <div class="metric metric-primary"><b id="backendFps">0.0</b><span>backend fps</span></div>
+          <div class="metric metric-primary"><b id="maxBackendFps">--</b><span>capacity fps</span></div>
+          <div class="metric metric-primary"><b id="fps">0.0</b><span>frontend fps</span></div>
+          <div class="metric metric-secondary"><b id="uptime">0s</b><span>uptime</span></div>
+          <div class="metric metric-secondary"><b id="light">--</b><span>traffic</span></div>
+          <div class="metric metric-secondary"><b id="imuBrief">--</b><span>imu</span></div>
         </div>
       </section>
 
@@ -66,6 +67,6 @@
         </section>
       </aside>
     </main>
-    <script src="/static/app.js?v=20260504-frame-ws-statefix" type="module"></script>
+    <script src="/static/app.js?v=20260504-even-metrics" type="module"></script>
   </body>
 </html>
