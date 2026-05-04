@@ -197,6 +197,17 @@ class DeviceConfigTests(unittest.TestCase):
         self.assertGreater(result["fps_p50"], 0)
         self.assertEqual(manager.backend_benchmark, result)
 
+    def test_snapshot_includes_vision_frame_size(self) -> None:
+        manager = DeviceManager(
+            vision=FakeVision(),
+            navigation=NavigationStateMachine(),
+            speech=SpeechHub(),
+        )
+
+        snapshot = manager.snapshot()
+
+        self.assertEqual(snapshot["vision"], {"image_width": 16, "image_height": 12})
+
 
 if __name__ == "__main__":
     unittest.main()

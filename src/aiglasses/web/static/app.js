@@ -36,6 +36,7 @@ const displayFpsWindowMs = 3000;
 const maxTargetFps = 1000;
 const packetHeaderBytes = 32;
 const packetTypeVideoJpeg = 2;
+const defaultVisionFrame = { width: 640, height: 480 };
 
 function hasOwn(object, key) {
   return Object.prototype.hasOwnProperty.call(object, key);
@@ -154,6 +155,7 @@ function drawOverlay() {
   const crosswalk = latestObservation.crosswalk;
   const obstacles = latestObservation.obstacles || [];
   const traffic = latestObservation.traffic_light_detection;
+  const visionFrame = currentVisionFrameSize();
 
   function colorOverlay(summary, color, label) {
     if (!summary) return;
@@ -192,16 +194,16 @@ function drawOverlay() {
   ctx.lineWidth = 3;
   obstacles.slice(0, 6).forEach((obs) => {
     const [x1, y1, x2, y2] = obs.box || [0, 0, 0, 0];
-    const sx = rect.width / 640;
-    const sy = rect.height / 480;
+    const sx = rect.width / visionFrame.width;
+    const sy = rect.height / visionFrame.height;
     ctx.strokeRect(x1 * sx, y1 * sy, (x2 - x1) * sx, (y2 - y1) * sy);
     ctx.fillText(obs.label, x1 * sx + 4, y1 * sy + 14);
   });
 
   if (traffic?.box) {
     const [x1, y1, x2, y2] = traffic.box;
-    const sx = rect.width / 640;
-    const sy = rect.height / 480;
+    const sx = rect.width / visionFrame.width;
+    const sy = rect.height / visionFrame.height;
     const label = `${traffic.label} ${Math.round((traffic.confidence || 0) * 100)}%`;
     ctx.strokeStyle = "#38bdf8";
     ctx.fillStyle = "#38bdf8";
@@ -209,6 +211,19 @@ function drawOverlay() {
     ctx.strokeRect(x1 * sx, y1 * sy, (x2 - x1) * sx, (y2 - y1) * sy);
     ctx.fillText(label, x1 * sx + 4, Math.max(14, y1 * sy - 6));
   }
+}
+
+function currentVisionFrameSize() {
+  const width = Number(
+    latestState.vision?.image_width || latestState.backend_benchmark?.image_width
+  );
+  const height = Number(
+    latestState.vision?.image_height || latestState.backend_benchmark?.image_height
+  );
+  if (Number.isFinite(width) && width > 0 && Number.isFinite(height) && height > 0) {
+    return { width, height };
+  }
+  return defaultVisionFrame;
 }
 
 function pruneDisplayedFrames(now = performance.now()) {

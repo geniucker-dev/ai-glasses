@@ -334,6 +334,14 @@ class DeviceManager:
             "navigation": self.navigation.snapshot(),
             "imu": self.last_imu,
             "model_status": self.vision.model_status,
+            "vision": self.vision_frame_size(),
             "video_stats": self.video_stats(),
             "backend_benchmark": self.backend_benchmark,
+        }
+
+    def vision_frame_size(self) -> dict[str, int | None]:
+        models = getattr(getattr(self.vision, "config", None), "models", None)
+        return {
+            "image_width": getattr(models, "image_width", None),
+            "image_height": getattr(models, "image_height", None),
         }
