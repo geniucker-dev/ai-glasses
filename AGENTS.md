@@ -44,3 +44,5 @@ Pull requests should include a concise description, affected areas, verification
 ## Security & Configuration Tips
 
 Keep `config.toml` local; it may contain WiFi credentials and API keys. Start from `config.example.toml`, regenerate firmware headers after config changes, and avoid logging secrets in backend or firmware output.
+
+During early-stage development, do not preserve backward compatibility for renamed or removed configuration fields. Update `config.example.toml`, documentation, code, and tests to the current schema instead of adding compatibility aliases or migration logic.
