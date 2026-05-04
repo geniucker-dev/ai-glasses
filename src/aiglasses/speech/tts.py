@@ -35,9 +35,29 @@ class QueuedPcm16SpeechSink:
     async def emit(self, event: SpeechEvent) -> None:
         if not self.config.enabled or not event.text.strip():
             return
+        if event.source == "navigation":
+            self._drop_pending_navigation_events()
         await self._queue.put(event)
         if self._worker is None or self._worker.done():
             self._worker = asyncio.create_task(self._run_worker())
+
+    def _drop_pending_navigation_events(self) -> int:
+        kept: list[SpeechEvent] = []
+        dropped = 0
+        while True:
+            try:
+                event = self._queue.get_nowait()
+            except asyncio.QueueEmpty:
+                break
+            if event.source == "navigation":
+                dropped += 1
+            else:
+                kept.append(event)
+            self._queue.task_done()
+
+        for event in kept:
+            self._queue.put_nowait(event)
+        return dropped
 
     async def _run_worker(self) -> None:
         while True:

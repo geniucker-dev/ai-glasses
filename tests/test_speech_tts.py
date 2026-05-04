@@ -51,11 +51,33 @@ class SpeechTtsTests(unittest.IsolatedAsyncioTestCase):
             sample_rate=16000,
         )
 
-        await sink.emit(SpeechEvent("first"))
-        await sink.emit(SpeechEvent("second"))
+        await sink.emit(SpeechEvent("first", source="command"))
+        await sink.emit(SpeechEvent("second", source="command"))
         await asyncio.wait_for(sink._queue.join(), timeout=1)
 
         self.assertEqual(sent, [b"first", b"second"])
+
+    async def test_device_tts_keeps_only_latest_pending_navigation_event(self) -> None:
+        sent: list[bytes] = []
+
+        async def send_pcm16(pcm16: bytes) -> bool:
+            sent.append(pcm16)
+            return True
+
+        sink = QueuedTtsSink(
+            SpeechConfig(enabled=True),
+            api_key="test-key",
+            send_pcm16=send_pcm16,
+            sample_rate=16000,
+        )
+
+        await sink.emit(SpeechEvent("first"))
+        await asyncio.sleep(0.01)
+        await sink.emit(SpeechEvent("second"))
+        await sink.emit(SpeechEvent("third"))
+        await asyncio.wait_for(sink._queue.join(), timeout=1)
+
+        self.assertEqual(sent, [b"first", b"third"])
 
     def test_device_tts_uses_firmware_sample_rate(self) -> None:
         sink = DashscopeTtsSpeechSink(
