@@ -44,6 +44,31 @@ OBSTACLE_SPEECH_LABELS = {
     "stone": "石头",
     "box": "箱子",
 }
+BLIND_PATH_MIN_CONFIDENCE = 0.35
+BLIND_PATH_MIN_AREA_RATIO = 0.003
+BLIND_PATH_NEAR_AREA_RATIO = 0.015
+BLIND_PATH_AHEAD_BOTTOM_MIN = 0.45
+BLIND_PATH_CLOSE_BOTTOM_MIN = 0.60
+BLIND_PATH_CORRIDOR_HALF_WIDTH = 0.38
+BLIND_PATH_STRICT_HALF_WIDTH = 0.28
+
+CROSSING_MIN_CONFIDENCE = 0.35
+CROSSING_MIN_AREA_RATIO = 0.002
+CROSSING_AHEAD_BOTTOM_MIN = 0.25
+CROSSING_CORRIDOR_HALF_WIDTH = 0.55
+CROSSING_GREEN_REQUIRED_FRAMES = 2
+
+CROSSING_VEHICLE_LABELS = {
+    "bicycle",
+    "bike",
+    "motorcycle",
+    "motorbike",
+    "scooter",
+    "car",
+    "bus",
+    "truck",
+    "van",
+}
 
 
 @dataclass(frozen=True)
@@ -62,6 +87,7 @@ class NavigationStateMachine:
         self._candidate_speech = ""
         self._candidate_frames = 0
         self._last_guidance_spoken_at: float | None = None
+        self._crossing_green_frames = 0
 
     def command(self, text: str) -> NavigationResult:
         normalized = text.strip()
@@ -107,6 +133,7 @@ class NavigationStateMachine:
             "last_speech": self.last_speech,
             "candidate_speech": self._candidate_speech,
             "candidate_frames": self._candidate_frames,
+            "crossing_green_frames": self._crossing_green_frames,
         }
 
     def _debounced_speech(self, speech: str | None) -> str | None:
@@ -144,6 +171,7 @@ class NavigationStateMachine:
         self._candidate_speech = ""
         self._candidate_frames = 0
         self._last_guidance_spoken_at = None
+        self._crossing_green_frames = 0
 
     def _stop_current_mode(self) -> str:
         mode_to_stop = self.mode
@@ -165,20 +193,31 @@ class NavigationStateMachine:
 
     @staticmethod
     def _is_urgent_speech(speech: str) -> bool:
-        return speech.startswith("前方有") or speech in {
-            "红灯。",
-            "绿灯。",
-            "黄灯。",
-            "绿灯稳定，开始通行。",
-        }
+        return (
+            speech.startswith("前方有")
+            or speech.startswith("前方疑似有")
+            or speech.startswith("前方盲道上")
+            or speech.startswith("绿灯，但斑马线附近")
+            or speech
+            in {
+                "红灯。",
+                "绿灯。",
+                "黄灯。",
+                "绿灯稳定，开始通行。",
+            }
+        )
 
     def _blind_path_guidance(self, obs: dict[str, Any]) -> str | None:
-        obstacle = obs.get("nearest_obstacle")
-        if obstacle:
-            return f"前方有{self._obstacle_speech_label(obstacle)}，停一下。"
         blind = obs.get("blind_path")
         if not blind:
+            obstacle = self._find_centered_near_obstacle(obs)
+            if obstacle:
+                label = self._obstacle_speech_label(obstacle)
+                return f"前方疑似有{label}，请先停下。"
             return "没看到盲道，请原地小幅转动。"
+        obstacle = self._find_blind_path_obstacle(obs)
+        if obstacle:
+            return f"前方盲道上疑似有{self._obstacle_speech_label(obstacle)}，请先停下。"
         offset = float(blind.get("center_offset", 0.0))
         angle = float(blind.get("angle_deg", 0.0))
         if offset < -0.18:
@@ -196,21 +235,226 @@ class NavigationStateMachine:
         label = str(obstacle.get("label") or "").strip()
         return OBSTACLE_SPEECH_LABELS.get(label, label or "障碍物")
 
+    def _find_blind_path_obstacle(self, obs: dict[str, Any]) -> dict[str, Any] | None:
+        blind = obs.get("blind_path")
+        if not isinstance(blind, dict):
+            return None
+        path_center = self._mask_center_offset(blind)
+        candidates = [
+            obstacle
+            for obstacle in self._obstacles(obs)
+            if self._is_blind_path_obstacle(obstacle, obs, path_center)
+        ]
+        return max(candidates, key=self._obstacle_priority, default=None)
+
+    def _find_centered_near_obstacle(self, obs: dict[str, Any]) -> dict[str, Any] | None:
+        candidates = [
+            obstacle
+            for obstacle in self._obstacles(obs)
+            if self._is_centered_near_obstacle(obstacle, obs)
+        ]
+        return max(candidates, key=self._obstacle_priority, default=None)
+
+    def _is_centered_near_obstacle(self, obstacle: dict[str, Any], obs: dict[str, Any]) -> bool:
+        if float(obstacle.get("confidence", 0.0)) < BLIND_PATH_MIN_CONFIDENCE:
+            return False
+        if float(obstacle.get("area_ratio", 0.0)) < BLIND_PATH_NEAR_AREA_RATIO:
+            return False
+        if not self._is_obstacle_ahead(
+            obstacle,
+            obs,
+            min_bottom=BLIND_PATH_AHEAD_BOTTOM_MIN,
+            close_bottom=BLIND_PATH_CLOSE_BOTTOM_MIN,
+            near_area=BLIND_PATH_NEAR_AREA_RATIO,
+        ):
+            return False
+        return self._is_obstacle_in_corridor(
+            obstacle,
+            obs,
+            center_offset=0.0,
+            half_width=BLIND_PATH_STRICT_HALF_WIDTH,
+            centerline_margin=0.10,
+        )
+
+    def _is_blind_path_obstacle(
+        self,
+        obstacle: dict[str, Any],
+        obs: dict[str, Any],
+        path_center: float,
+    ) -> bool:
+        if float(obstacle.get("confidence", 0.0)) < BLIND_PATH_MIN_CONFIDENCE:
+            return False
+        area_ratio = float(obstacle.get("area_ratio", 0.0))
+        if area_ratio < BLIND_PATH_MIN_AREA_RATIO:
+            return False
+        if not self._is_obstacle_ahead(
+            obstacle,
+            obs,
+            min_bottom=BLIND_PATH_AHEAD_BOTTOM_MIN,
+            close_bottom=BLIND_PATH_CLOSE_BOTTOM_MIN,
+            near_area=BLIND_PATH_NEAR_AREA_RATIO,
+        ):
+            return False
+        return self._is_obstacle_in_corridor(
+            obstacle,
+            obs,
+            center_offset=path_center,
+            half_width=(
+                BLIND_PATH_STRICT_HALF_WIDTH
+                if area_ratio < BLIND_PATH_NEAR_AREA_RATIO
+                else BLIND_PATH_CORRIDOR_HALF_WIDTH
+            ),
+            centerline_margin=0.12,
+        )
+
+    @staticmethod
+    def _obstacles(obs: dict[str, Any]) -> list[dict[str, Any]]:
+        obstacles = obs.get("obstacles")
+        if isinstance(obstacles, list):
+            return [item for item in obstacles if isinstance(item, dict)]
+        nearest = obs.get("nearest_obstacle")
+        return [nearest] if isinstance(nearest, dict) else []
+
+    @staticmethod
+    def _mask_center_offset(mask: Any) -> float:
+        if isinstance(mask, dict):
+            return float(mask.get("center_offset", 0.0))
+        return 0.0
+
+    def _is_obstacle_ahead(
+        self,
+        obstacle: dict[str, Any],
+        obs: dict[str, Any],
+        *,
+        min_bottom: float,
+        close_bottom: float,
+        near_area: float,
+    ) -> bool:
+        bottom = self._box_bottom_ratio(obstacle, obs)
+        area_ratio = float(obstacle.get("area_ratio", 0.0))
+        return bottom >= (min_bottom if area_ratio >= near_area else close_bottom)
+
+    def _is_obstacle_in_corridor(
+        self,
+        obstacle: dict[str, Any],
+        obs: dict[str, Any],
+        *,
+        center_offset: float,
+        half_width: float,
+        centerline_margin: float,
+    ) -> bool:
+        box = self._normalised_box(obstacle, obs)
+        if box is None:
+            return False
+        x1, _, x2, _ = box
+        left = self._x_to_offset(x1)
+        right = self._x_to_offset(x2)
+        center = self._x_to_offset((x1 + x2) / 2.0)
+        center_aligned = abs(center - center_offset) <= half_width
+        overlaps_centerline = left <= center_offset + centerline_margin and right >= center_offset - centerline_margin
+        return center_aligned or overlaps_centerline
+
+    def _box_bottom_ratio(self, obstacle: dict[str, Any], obs: dict[str, Any]) -> float:
+        box = self._normalised_box(obstacle, obs)
+        return float(box[3]) if box is not None else 0.0
+
+    @staticmethod
+    def _x_to_offset(x: float) -> float:
+        return max(-1.0, min(1.0, (x - 0.5) * 2.0))
+
+    @staticmethod
+    def _normalised_box(
+        obstacle: dict[str, Any],
+        obs: dict[str, Any],
+    ) -> tuple[float, float, float, float] | None:
+        raw_box = obstacle.get("box")
+        if not isinstance(raw_box, (list, tuple)) or len(raw_box) != 4:
+            return None
+        x1, y1, x2, y2 = (float(value) for value in raw_box)
+        width = float(obs.get("frame_width") or 0.0)
+        height = float(obs.get("frame_height") or 0.0)
+        if width > 1.0 and max(abs(x1), abs(x2)) > 1.0:
+            x1 /= width
+            x2 /= width
+        if height > 1.0 and max(abs(y1), abs(y2)) > 1.0:
+            y1 /= height
+            y2 /= height
+        return (
+            max(0.0, min(1.0, x1)),
+            max(0.0, min(1.0, y1)),
+            max(0.0, min(1.0, x2)),
+            max(0.0, min(1.0, y2)),
+        )
+
+    def _obstacle_priority(self, obstacle: dict[str, Any]) -> tuple[float, float, float]:
+        box = obstacle.get("box")
+        bottom = float(box[3]) if isinstance(box, (list, tuple)) and len(box) == 4 else 0.0
+        return (
+            float(obstacle.get("area_ratio", 0.0)),
+            float(obstacle.get("confidence", 0.0)),
+            bottom,
+        )
+
     def _crossing_guidance(self, obs: dict[str, Any]) -> str | None:
         crosswalk = obs.get("crosswalk")
         light = obs.get("traffic_light")
-        if not crosswalk:
-            return "没看到斑马线，请原地小幅转动。"
         if light == "stop":
+            self._crossing_green_frames = 0
             return "红灯。"
+        if light in {"countdown_go", "countdown_stop"}:
+            self._crossing_green_frames = 0
+            return "黄灯。"
+        if light != "go":
+            self._crossing_green_frames = 0
+        if not crosswalk:
+            self._crossing_green_frames = 0
+            return "没看到斑马线，请原地小幅转动。"
         if light == "go":
-            return "绿灯稳定，开始通行。"
+            if self._find_crossing_vehicle_hazard(obs):
+                self._crossing_green_frames = 0
+                return "绿灯，但斑马线附近疑似有车辆通过，请先等待，确认安全后再过街。"
+            self._crossing_green_frames += 1
+            if self._crossing_green_frames >= CROSSING_GREEN_REQUIRED_FRAMES:
+                return "绿灯稳定，开始通行。"
+            return None
         offset = float(crosswalk.get("center_offset", 0.0))
         if offset < -0.15:
             return "请向左转动。"
         if offset > 0.15:
             return "请向右转动。"
         return "发现斑马线，对准方向。"
+
+    def _find_crossing_vehicle_hazard(self, obs: dict[str, Any]) -> dict[str, Any] | None:
+        center = self._mask_center_offset(obs.get("crosswalk") or obs.get("blind_path"))
+        candidates = [
+            obstacle
+            for obstacle in self._obstacles(obs)
+            if self._is_crossing_vehicle_hazard(obstacle, obs, center)
+        ]
+        return max(candidates, key=self._obstacle_priority, default=None)
+
+    def _is_crossing_vehicle_hazard(
+        self,
+        obstacle: dict[str, Any],
+        obs: dict[str, Any],
+        center_offset: float,
+    ) -> bool:
+        label = str(obstacle.get("label") or "").strip().lower().replace("_", " ")
+        if label not in CROSSING_VEHICLE_LABELS:
+            return False
+        if float(obstacle.get("confidence", 0.0)) < CROSSING_MIN_CONFIDENCE:
+            return False
+        if float(obstacle.get("area_ratio", 0.0)) < CROSSING_MIN_AREA_RATIO:
+            return False
+        if self._box_bottom_ratio(obstacle, obs) < CROSSING_AHEAD_BOTTOM_MIN:
+            return False
+        return self._is_obstacle_in_corridor(
+            obstacle,
+            obs,
+            center_offset=center_offset,
+            half_width=CROSSING_CORRIDOR_HALF_WIDTH,
+            centerline_margin=0.18,
+        )
 
     def _traffic_light_guidance(self, obs: dict[str, Any]) -> str | None:
         light = obs.get("traffic_light")

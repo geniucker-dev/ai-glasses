@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Sequence
 
 import cv2
 import numpy as np
@@ -10,11 +10,34 @@ from aiglasses.config import AppConfig
 
 from .obstacle_classes import OBSTACLE_LABELS, YOLOE_OBSTACLE_CLASS_NAMES
 from .torch_yolo import TorchYoloModel
-from .types import FrameAnalysis
+from .types import Detection, FrameAnalysis
 from .yolo_postprocess import ModelUnavailable, filter_detections
 
 
 NON_SIGNAL_TRAFFIC_LABELS = {None, "blank", "countdown_blank", "crossing"}
+TRAFFIC_SIGNAL_CLEAR_MARGIN = 0.10
+
+
+def _select_traffic_signal(detections: Sequence[Detection]) -> Detection | None:
+    signal_detection = max(
+        (det for det in detections if det.label not in NON_SIGNAL_TRAFFIC_LABELS),
+        key=lambda det: det.confidence,
+        default=None,
+    )
+    if signal_detection is None:
+        return None
+    non_signal_detection = max(
+        (det for det in detections if det.label in NON_SIGNAL_TRAFFIC_LABELS),
+        key=lambda det: det.confidence,
+        default=None,
+    )
+    if (
+        non_signal_detection is not None
+        and signal_detection.confidence + TRAFFIC_SIGNAL_CLEAR_MARGIN
+        < non_signal_detection.confidence
+    ):
+        return None
+    return signal_detection
 
 
 @dataclass
@@ -99,16 +122,10 @@ class VisionPipeline:
         if self.traffic_model:
             try:
                 result = self.traffic_model.predict(frame)
-                traffic_detection = max(
-                    result.detections,
-                    key=lambda det: det.confidence,
-                    default=None,
-                )
-                if traffic_detection and traffic_detection.label in NON_SIGNAL_TRAFFIC_LABELS:
-                    traffic_detection = None
-                if result.top_label not in NON_SIGNAL_TRAFFIC_LABELS:
-                    traffic_light = result.top_label
-                    traffic_conf = result.top_confidence
+                traffic_detection = _select_traffic_signal(result.detections)
+                if traffic_detection:
+                    traffic_light = traffic_detection.label
+                    traffic_conf = traffic_detection.confidence
                 status["traffic_light"] = self.traffic_model.status
             except Exception as exc:
                 status["traffic_light"] = f"error: {exc}"
@@ -122,6 +139,8 @@ class VisionPipeline:
             traffic_light_confidence=traffic_conf,
             traffic_light_detection=traffic_detection,
             model_status=status,
+            frame_width=self.config.models.image_width,
+            frame_height=self.config.models.image_height,
         )
         self.model_status = status
         return analysis

@@ -37,6 +37,8 @@ class FrameAnalysis:
     traffic_light_confidence: float = 0.0
     traffic_light_detection: Detection | None = None
     model_status: dict[str, str] = field(default_factory=dict)
+    frame_width: int | None = None
+    frame_height: int | None = None
 
     def to_observation(self) -> dict[str, Any]:
         nearest = max(self.obstacles, key=lambda item: item.area_ratio, default=None)
@@ -51,4 +53,6 @@ class FrameAnalysis:
                 self.traffic_light_detection.to_dict() if self.traffic_light_detection else None
             ),
             "model_status": self.model_status,
+            "frame_width": self.frame_width,
+            "frame_height": self.frame_height,
         }
