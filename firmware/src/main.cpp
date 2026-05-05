@@ -25,6 +25,12 @@ static constexpr int IMU_SPI_SCK = 3;
 static constexpr int IMU_SPI_CS = 4;
 static constexpr int MAX_TARGET_VIDEO_FPS = 1000;
 
+#define AGL_CAMERA_PROFILE_DEFAULT 0
+#define AGL_CAMERA_PROFILE_TRAFFIC_SIGNAL 1
+#ifndef AGL_CAMERA_PROFILE
+#define AGL_CAMERA_PROFILE AGL_CAMERA_PROFILE_TRAFFIC_SIGNAL
+#endif
+
 static constexpr int AUDIO_BYTES_PER_CHUNK = AGL_AUDIO_SAMPLE_RATE * AGL_AUDIO_CHUNK_MS / 1000 * 2;
 static constexpr size_t PACKET_HEADER_SIZE = sizeof(PacketHeader);
 static constexpr size_t CONTROL_PACKET_CAPACITY = 1024;
@@ -85,6 +91,29 @@ bool send_packet(WebsocketsClient& ws, SemaphoreHandle_t mutex, PacketType type,
   return sent;
 }
 
+void apply_camera_profile(sensor_t* s) {
+  s->set_hmirror(s, 1);
+  s->set_vflip(s, 0);
+  s->set_quality(s, AGL_JPEG_QUALITY);
+
+#if AGL_CAMERA_PROFILE == AGL_CAMERA_PROFILE_TRAFFIC_SIGNAL
+  s->set_exposure_ctrl(s, 1);
+  s->set_gain_ctrl(s, 1);
+  s->set_whitebal(s, 1);
+  s->set_awb_gain(s, 1);
+  s->set_aec2(s, 1);
+  s->set_ae_level(s, -1);
+  s->set_gainceiling(s, GAINCEILING_4X);
+  s->set_saturation(s, 1);
+  s->set_contrast(s, 1);
+  s->set_sharpness(s, 1);
+  s->set_denoise(s, 1);
+  s->set_bpc(s, 1);
+  s->set_wpc(s, 1);
+  s->set_lenc(s, 1);
+#endif
+}
+
 bool init_camera() {
   camera_config_t config;
   config.ledc_channel = LEDC_CHANNEL_0;
@@ -101,8 +130,8 @@ bool init_camera() {
   config.pin_pclk = PCLK_GPIO_NUM;
   config.pin_vsync = VSYNC_GPIO_NUM;
   config.pin_href = HREF_GPIO_NUM;
-  config.pin_sscb_sda = SIOD_GPIO_NUM;
-  config.pin_sscb_scl = SIOC_GPIO_NUM;
+  config.pin_sccb_sda = SIOD_GPIO_NUM;
+  config.pin_sccb_scl = SIOC_GPIO_NUM;
   config.pin_pwdn = PWDN_GPIO_NUM;
   config.pin_reset = RESET_GPIO_NUM;
   config.xclk_freq_hz = 20000000;
@@ -119,9 +148,7 @@ bool init_camera() {
   }
   sensor_t* s = esp_camera_sensor_get();
   if (s) {
-    s->set_hmirror(s, 1);
-    s->set_vflip(s, 0);
-    s->set_quality(s, AGL_JPEG_QUALITY);
+    apply_camera_profile(s);
   }
   return true;
 }
@@ -360,15 +387,26 @@ void task_led(void*) {
 }
 
 void connect_wifi() {
+  const unsigned long WIFI_CONNECT_TIMEOUT_MS = 15000;
+  const unsigned long WIFI_CONNECT_POLL_MS = 300;
+
   WiFi.mode(WIFI_STA);
   WiFi.setSleep(false);
   esp_wifi_set_ps(WIFI_PS_NONE);
   WiFi.setTxPower(WIFI_POWER_19_5dBm);
   WiFi.begin(AGL_WIFI_SSID, AGL_WIFI_PASSWORD);
   Serial.print("[WiFi] connecting");
-  while (WiFi.status() != WL_CONNECTED) {
+  unsigned long started = millis();
+  while (WiFi.status() != WL_CONNECTED && millis() - started < WIFI_CONNECT_TIMEOUT_MS) {
     Serial.print(".");
-    delay(300);
+    delay(WIFI_CONNECT_POLL_MS);
+  }
+  if (WiFi.status() != WL_CONNECTED) {
+    wifiReady = false;
+    Serial.println();
+    Serial.printf("[WiFi] connection timed out after %lu ms; restarting\n", WIFI_CONNECT_TIMEOUT_MS);
+    delay(1500);
+    esp_restart();
   }
   wifiReady = true;
   Serial.println(" " + WiFi.localIP().toString());

@@ -1,6 +1,6 @@
 import unittest
 
-from aiglasses.protocol import Packet, PacketType, ProtocolError
+from aiglasses.protocol import MAX_PAYLOAD_BYTES, Packet, PacketType, ProtocolError
 
 
 class PacketTests(unittest.TestCase):
@@ -17,6 +17,27 @@ class PacketTests(unittest.TestCase):
         raw[-1] ^= 0xFF
         with self.assertRaises(ProtocolError):
             Packet.unpack(bytes(raw))
+
+    def test_unpack_rejects_payload_over_default_limit(self) -> None:
+        packet = Packet(PacketType.CONTROL_JSON, seq=1, timestamp_ms=2, payload=b"{}").pack()
+        raw = bytearray(packet)
+        raw[24:28] = (MAX_PAYLOAD_BYTES + 1).to_bytes(4, "little")
+
+        with self.assertRaisesRegex(ProtocolError, "payload too large"):
+            Packet.unpack(bytes(raw))
+
+    def test_unpack_allows_custom_payload_limit_boundary(self) -> None:
+        packet = Packet(PacketType.CONTROL_JSON, seq=1, timestamp_ms=2, payload=b"abcd")
+
+        decoded = Packet.unpack(packet.pack(), max_payload_bytes=4)
+
+        self.assertEqual(decoded.payload, b"abcd")
+
+    def test_unpack_rejects_custom_payload_limit_overflow(self) -> None:
+        packet = Packet(PacketType.CONTROL_JSON, seq=1, timestamp_ms=2, payload=b"abcd")
+
+        with self.assertRaisesRegex(ProtocolError, "payload too large"):
+            Packet.unpack(packet.pack(), max_payload_bytes=3)
 
 
 if __name__ == "__main__":

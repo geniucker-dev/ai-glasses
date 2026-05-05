@@ -14,6 +14,7 @@ password = "your-wifi-password"
 video_fps = 6
 jpeg_quality = 12
 frame_size = "VGA"
+camera_profile = "traffic_signal"
 audio_sample_rate = 16000
 audio_chunk_ms = 100
 imu_hz = 50

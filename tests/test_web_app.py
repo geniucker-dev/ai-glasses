@@ -1,3 +1,4 @@
+import asyncio
 import unittest
 from pathlib import Path
 
@@ -6,7 +7,16 @@ from fastapi.testclient import TestClient
 from aiglasses.config import AppConfig, SpeechConfig
 from aiglasses.config.settings import AsrConfig
 from aiglasses.config.settings import DeviceAudioDownConfig, DeviceConfig
-from aiglasses.web.app import validate_speech_config
+from aiglasses.protocol import Packet, PacketType
+from aiglasses.web.app import CONTROL_MAX_PAYLOAD_BYTES, _unpack_device_packet, validate_speech_config
+
+
+class FakeBroadcastManager:
+    def __init__(self) -> None:
+        self.messages: list[dict] = []
+
+    async def broadcast(self, message: dict) -> None:
+        self.messages.append(message)
 
 
 class WebAppTests(unittest.TestCase):
@@ -95,6 +105,42 @@ class WebAppTests(unittest.TestCase):
 
         with self.assertRaisesRegex(ValueError, "speech.provider"):
             validate_speech_config(config)
+
+    def test_unpack_device_packet_broadcasts_and_drops_oversized_packet(self) -> None:
+        manager = FakeBroadcastManager()
+        raw = Packet(PacketType.CONTROL_JSON, seq=1, timestamp_ms=2, payload=b"{}").pack()
+
+        packet = asyncio.run(
+            _unpack_device_packet(
+                raw,
+                channel="control",
+                max_payload_bytes=1,
+                manager=manager,
+            )
+        )
+
+        self.assertIsNone(packet)
+        self.assertEqual(len(manager.messages), 1)
+        self.assertEqual(manager.messages[0]["kind"], "device_error")
+        self.assertEqual(manager.messages[0]["channel"], "control")
+        self.assertIn("payload too large", manager.messages[0]["error"])
+
+    def test_unpack_device_packet_returns_valid_packet(self) -> None:
+        manager = FakeBroadcastManager()
+        raw = Packet(PacketType.CONTROL_JSON, seq=1, timestamp_ms=2, payload=b"{}").pack()
+
+        packet = asyncio.run(
+            _unpack_device_packet(
+                raw,
+                channel="control",
+                max_payload_bytes=CONTROL_MAX_PAYLOAD_BYTES,
+                manager=manager,
+            )
+        )
+
+        self.assertIsNotNone(packet)
+        self.assertEqual(packet.payload, b"{}")
+        self.assertEqual(manager.messages, [])
 
 
 if __name__ == "__main__":

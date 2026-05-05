@@ -10,6 +10,7 @@ class ConfigTests(unittest.TestCase):
     def test_example_loads(self) -> None:
         config = load_config("config.example.toml")
         self.assertEqual(config.server.port, 8081)
+        self.assertEqual(config.device.capture.camera_profile, "traffic_signal")
         self.assertEqual(config.device.capture.audio_sample_rate, 16000)
         self.assertEqual(config.models.image_width, 640)
         self.assertEqual(config.models.torch_device, "cuda:0")
@@ -23,7 +24,7 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(config.speech.piper_voice_en, "en_US-lessac-medium")
         self.assertFalse(config.speech.piper_use_cuda)
 
-    def test_models_ignores_unknown_fields(self) -> None:
+    def test_models_rejects_unknown_fields(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             config_path = Path(tmp) / "config.toml"
             config_path.write_text(
@@ -31,15 +32,41 @@ class ConfigTests(unittest.TestCase):
                 encoding="utf-8",
             )
 
-            config = load_config(config_path)
+            with self.assertRaisesRegex(ValueError, r"Unknown config field in \[models\]: runtime"):
+                load_config(config_path)
 
-        self.assertEqual(config.models.torch_device, "cpu")
-        self.assertEqual(config.models.obstacle, "models/yoloe-11l-seg-obstacle.pt")
+    def test_server_rejects_unknown_fields(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = Path(tmp) / "config.toml"
+            config_path.write_text('[server]\nunknown = "value"\n', encoding="utf-8")
+
+            with self.assertRaisesRegex(ValueError, r"Unknown config field in \[server\]: unknown"):
+                load_config(config_path)
+
+    def test_server_rejects_non_table_section(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = Path(tmp) / "config.toml"
+            config_path.write_text('server = "bad"\n', encoding="utf-8")
+
+            with self.assertRaisesRegex(ValueError, r"Config section \[server\] must be a table"):
+                load_config(config_path)
+
+    def test_nested_section_rejects_non_table_section(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = Path(tmp) / "config.toml"
+            config_path.write_text('[device]\ncapture = "bad"\n', encoding="utf-8")
+
+            with self.assertRaisesRegex(
+                ValueError,
+                r"Config section \[capture\] must be a table",
+            ):
+                load_config(config_path)
 
     def test_firmware_header_includes_frame_size(self) -> None:
         header = render_header("config.example.toml")
 
         self.assertIn("#define AGL_FRAME_SIZE FRAMESIZE_VGA", header)
+        self.assertIn("#define AGL_CAMERA_PROFILE AGL_CAMERA_PROFILE_TRAFFIC_SIGNAL", header)
 
     def test_firmware_header_maps_configured_frame_size(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -49,6 +76,18 @@ class ConfigTests(unittest.TestCase):
             header = render_header(config_path)
 
         self.assertIn("#define AGL_FRAME_SIZE FRAMESIZE_QVGA", header)
+
+    def test_firmware_header_maps_configured_camera_profile(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = Path(tmp) / "config.toml"
+            config_path.write_text(
+                '[device.capture]\ncamera_profile = "default"\n',
+                encoding="utf-8",
+            )
+
+            header = render_header(config_path)
+
+        self.assertIn("#define AGL_CAMERA_PROFILE AGL_CAMERA_PROFILE_DEFAULT", header)
 
     def test_missing_config_message(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

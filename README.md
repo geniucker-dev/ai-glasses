@@ -27,6 +27,7 @@ cp config.example.toml config.toml
 - 采集参数：
   - `device.capture.frame_size`：摄像头分辨率，会写入固件生成头文件，例如 `VGA`、`QVGA`
   - `device.capture.video_fps`、`jpeg_quality`：视频上传帧率和 JPEG 质量
+  - `device.capture.camera_profile`：固件相机调参配置，默认 `traffic_signal` 会压曝光和增益以保留红绿灯边缘
 - DashScope ASR 配置：
   - `asr.dashscope_api_key`：DashScope API Key
   - `asr.websocket_base_url`：实时 ASR WebSocket 地址

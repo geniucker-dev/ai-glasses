@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 import asyncio
-import audioop
 import io
 import logging
 from pathlib import Path
 from typing import Awaitable, Callable
 import wave
+
+import numpy as np
 
 from aiglasses.config import SpeechConfig
 
@@ -273,15 +274,52 @@ class LocalTtsSpeechSink(QueuedPcm16SpeechSink):
             source_rate = wav.getframerate()
             pcm = wav.readframes(wav.getnframes())
 
+        samples = _decode_pcm(pcm, sample_width)
         if channels > 1:
-            pcm = audioop.tomono(pcm, sample_width, 0.5, 0.5)
-            channels = 1
-        if sample_width != 2:
-            pcm = audioop.lin2lin(pcm, sample_width, 2)
-            sample_width = 2
+            samples = samples.reshape(-1, channels).mean(axis=1)
         if source_rate != self.sample_rate:
-            pcm, _ = audioop.ratecv(pcm, sample_width, channels, source_rate, self.sample_rate, None)
-        return pcm
+            samples = _resample_linear(samples, source_rate, self.sample_rate)
+        return _float_to_pcm16(samples)
+
+
+def _decode_pcm(pcm: bytes, sample_width: int) -> np.ndarray:
+    if not pcm:
+        return np.array([], dtype=np.float32)
+    if sample_width == 1:
+        samples = np.frombuffer(pcm, dtype=np.uint8).astype(np.float32)
+        return (samples - 128.0) / 128.0
+    if sample_width == 2:
+        samples = np.frombuffer(pcm, dtype="<i2").astype(np.float32)
+        return samples / 32768.0
+    if sample_width == 3:
+        raw = np.frombuffer(pcm, dtype=np.uint8).reshape(-1, 3)
+        values = (
+            raw[:, 0].astype(np.int32)
+            | (raw[:, 1].astype(np.int32) << 8)
+            | (raw[:, 2].astype(np.int32) << 16)
+        )
+        values = np.where(values & 0x800000, values | ~0xFFFFFF, values)
+        return values.astype(np.float32) / 8_388_608.0
+    if sample_width == 4:
+        samples = np.frombuffer(pcm, dtype="<i4").astype(np.float32)
+        return samples / 2_147_483_648.0
+    raise RuntimeError(f"unsupported WAV sample width: {sample_width}")
+
+
+def _resample_linear(samples: np.ndarray, source_rate: int, target_rate: int) -> np.ndarray:
+    if len(samples) == 0 or source_rate == target_rate:
+        return samples.astype(np.float32, copy=False)
+    target_len = max(1, round(len(samples) * target_rate / source_rate))
+    source_positions = np.arange(len(samples), dtype=np.float32)
+    target_positions = np.linspace(0, len(samples) - 1, num=target_len, dtype=np.float32)
+    return np.interp(target_positions, source_positions, samples).astype(np.float32)
+
+
+def _float_to_pcm16(samples: np.ndarray) -> bytes:
+    if len(samples) == 0:
+        return b""
+    clipped = np.clip(samples, -1.0, 32767.0 / 32768.0)
+    return (clipped * 32768.0).astype("<i2").tobytes()
 
 
 def _is_cjk(char: str) -> bool:

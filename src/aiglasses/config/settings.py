@@ -23,6 +23,7 @@ class DeviceCaptureConfig:
     video_fps: int = 6
     jpeg_quality: int = 12
     frame_size: str = "VGA"
+    camera_profile: str = "traffic_signal"
     audio_sample_rate: int = 16000
     audio_chunk_ms: int = 100
     imu_hz: int = 50
@@ -109,12 +110,18 @@ class AppConfig:
 
 def _section(data: dict, name: str) -> dict:
     value = data.get(name, {})
-    return value if isinstance(value, dict) else {}
+    if not isinstance(value, dict):
+        raise ValueError(f"Config section [{name}] must be a table")
+    return value
 
 
-def _known_fields(cls: type, data: dict) -> dict:
+def _build_section(section_name: str, cls: type, data: dict):
     names = {item.name for item in fields(cls)}
-    return {key: value for key, value in data.items() if key in names}
+    unknown = sorted(set(data) - names)
+    if unknown:
+        field_list = ", ".join(unknown)
+        raise ValueError(f"Unknown config field in [{section_name}]: {field_list}")
+    return cls(**data)
 
 
 def load_config(path: str | Path = "config.toml") -> AppConfig:
@@ -128,23 +135,33 @@ def load_config(path: str | Path = "config.toml") -> AppConfig:
         raw = tomllib.load(fh)
 
     device = _section(raw, "device")
+    device_unknown = sorted(set(device) - {"id", "wifi", "capture", "audio_down"})
+    if device_unknown:
+        field_list = ", ".join(device_unknown)
+        raise ValueError(f"Unknown config field in [device]: {field_list}")
     capture = _section(device, "capture")
     wifi = _section(device, "wifi")
     audio_down = _section(device, "audio_down")
     vision = _section(raw, "vision")
+    vision_unknown = sorted(set(vision) - {"thresholds"})
+    if vision_unknown:
+        field_list = ", ".join(vision_unknown)
+        raise ValueError(f"Unknown config field in [vision]: {field_list}")
 
     return AppConfig(
         path=config_path,
-        server=ServerConfig(**_section(raw, "server")),
+        server=_build_section("server", ServerConfig, _section(raw, "server")),
         device=DeviceConfig(
             id=str(device.get("id", DeviceConfig.id)),
-            wifi=DeviceWifiConfig(**wifi),
-            capture=DeviceCaptureConfig(**capture),
-            audio_down=DeviceAudioDownConfig(**audio_down),
+            wifi=_build_section("device.wifi", DeviceWifiConfig, wifi),
+            capture=_build_section("device.capture", DeviceCaptureConfig, capture),
+            audio_down=_build_section("device.audio_down", DeviceAudioDownConfig, audio_down),
         ),
-        models=ModelsConfig(**_known_fields(ModelsConfig, _section(raw, "models"))),
-        vision_thresholds=VisionThresholds(**_section(vision, "thresholds")),
-        asr=AsrConfig(**_section(raw, "asr")),
-        speech=SpeechConfig(**_section(raw, "speech")),
-        web=WebConfig(**_section(raw, "web")),
+        models=_build_section("models", ModelsConfig, _section(raw, "models")),
+        vision_thresholds=_build_section(
+            "vision.thresholds", VisionThresholds, _section(vision, "thresholds")
+        ),
+        asr=_build_section("asr", AsrConfig, _section(raw, "asr")),
+        speech=_build_section("speech", SpeechConfig, _section(raw, "speech")),
+        web=_build_section("web", WebConfig, _section(raw, "web")),
     )

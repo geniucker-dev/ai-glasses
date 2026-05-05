@@ -24,6 +24,7 @@ class PacketType(IntEnum):
 MAGIC = b"AGL1"
 VERSION = 1
 HEADER = struct.Struct("<4sBBHQQII")
+MAX_PAYLOAD_BYTES = 1_048_576
 
 
 @dataclass(frozen=True)
@@ -49,7 +50,7 @@ class Packet:
         return header + self.payload
 
     @classmethod
-    def unpack(cls, data: bytes) -> "Packet":
+    def unpack(cls, data: bytes, *, max_payload_bytes: int = MAX_PAYLOAD_BYTES) -> "Packet":
         if len(data) < HEADER.size:
             raise ProtocolError("packet too short")
         magic, version, typ, flags, seq, timestamp_ms, payload_len, crc = HEADER.unpack(
@@ -59,6 +60,12 @@ class Packet:
             raise ProtocolError("bad magic")
         if version != VERSION:
             raise ProtocolError(f"unsupported protocol version: {version}")
+        actual_payload_len = len(data) - HEADER.size
+        if payload_len > max_payload_bytes or actual_payload_len > max_payload_bytes:
+            raise ProtocolError(
+                f"payload too large: {max(payload_len, actual_payload_len)} bytes exceeds "
+                f"{max_payload_bytes}"
+            )
         payload = data[HEADER.size :]
         if len(payload) != payload_len:
             raise ProtocolError("payload length mismatch")

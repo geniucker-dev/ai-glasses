@@ -1,3 +1,3 @@
-from .packet import Packet, PacketType, ProtocolError
+from .packet import MAX_PAYLOAD_BYTES, Packet, PacketType, ProtocolError
 
-__all__ = ["Packet", "PacketType", "ProtocolError"]
+__all__ = ["MAX_PAYLOAD_BYTES", "Packet", "PacketType", "ProtocolError"]

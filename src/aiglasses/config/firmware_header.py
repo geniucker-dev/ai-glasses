@@ -29,6 +29,11 @@ FRAME_SIZE_MACROS = {
     "UXGA": "FRAMESIZE_UXGA",
 }
 
+CAMERA_PROFILE_MACROS = {
+    "DEFAULT": "AGL_CAMERA_PROFILE_DEFAULT",
+    "TRAFFIC_SIGNAL": "AGL_CAMERA_PROFILE_TRAFFIC_SIGNAL",
+}
+
 
 def _frame_size_macro(value: str) -> str:
     key = value.strip().upper()
@@ -37,6 +42,17 @@ def _frame_size_macro(value: str) -> str:
     except KeyError as exc:
         choices = ", ".join(sorted(FRAME_SIZE_MACROS))
         raise ValueError(f"unsupported device.capture.frame_size: {value!r}; choose one of: {choices}") from exc
+
+
+def _camera_profile_macro(value: str) -> str:
+    key = value.strip().upper()
+    try:
+        return CAMERA_PROFILE_MACROS[key]
+    except KeyError as exc:
+        choices = ", ".join(sorted(CAMERA_PROFILE_MACROS))
+        raise ValueError(
+            f"unsupported device.capture.camera_profile: {value!r}; choose one of: {choices}"
+        ) from exc
 
 
 def render_header(config_path: str | Path) -> str:
@@ -57,6 +73,7 @@ def render_header(config_path: str | Path) -> str:
 #define AGL_VIDEO_FPS {int(capture.video_fps)}
 #define AGL_JPEG_QUALITY {int(capture.jpeg_quality)}
 #define AGL_FRAME_SIZE {_frame_size_macro(capture.frame_size)}
+#define AGL_CAMERA_PROFILE {_camera_profile_macro(capture.camera_profile)}
 #define AGL_AUDIO_SAMPLE_RATE {int(capture.audio_sample_rate)}
 #define AGL_AUDIO_CHUNK_MS {int(capture.audio_chunk_ms)}
 #define AGL_IMU_HZ {int(capture.imu_hz)}

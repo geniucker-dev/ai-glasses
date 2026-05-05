@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+from contextlib import asynccontextmanager
 import logging
 from pathlib import Path
 from typing import Annotated
@@ -14,12 +15,37 @@ from aiglasses.asr import AsrService
 from aiglasses.config import AppConfig
 from aiglasses.device import DeviceManager, clamp_target_video_fps
 from aiglasses.navigation import NavigationStateMachine
-from aiglasses.protocol import Packet
+from aiglasses.protocol import MAX_PAYLOAD_BYTES, Packet, ProtocolError
 from aiglasses.speech import DashscopeTtsSpeechSink, LocalTtsSpeechSink, SpeechHub, UiSpeechSink
 from aiglasses.vision import VisionPipeline
 
 
 logger = logging.getLogger("aiglasses.web")
+
+CONTROL_MAX_PAYLOAD_BYTES = 8 * 1024
+AUDIO_MAX_PAYLOAD_BYTES = 64 * 1024
+VIDEO_MAX_PAYLOAD_BYTES = MAX_PAYLOAD_BYTES
+
+
+def _is_websocket_state_error(exc: RuntimeError) -> bool:
+    message = str(exc)
+    return "WebSocket is not connected" in message or "Cannot call" in message
+
+
+async def _unpack_device_packet(
+    data: bytes,
+    *,
+    channel: str,
+    max_payload_bytes: int,
+    manager: DeviceManager | None = None,
+) -> Packet | None:
+    try:
+        return Packet.unpack(data, max_payload_bytes=max_payload_bytes)
+    except ProtocolError as exc:
+        logger.warning("dropping bad %s packet: %s", channel, exc)
+        if manager is not None:
+            await manager.broadcast({"kind": "device_error", "channel": channel, "error": str(exc)})
+        return None
 
 
 def validate_speech_config(config: AppConfig) -> None:
@@ -35,11 +61,6 @@ def validate_speech_config(config: AppConfig) -> None:
 
 def create_app(config: AppConfig) -> FastAPI:
     validate_speech_config(config)
-    app = FastAPI(title=config.web.title)
-    web_dir = Path(__file__).resolve().parent
-    static_dir = web_dir / "static"
-    app.mount("/static", StaticFiles(directory=static_dir), name="static")
-
     speech = SpeechHub()
     navigation = NavigationStateMachine()
     manager = DeviceManager(
@@ -70,12 +91,8 @@ def create_app(config: AppConfig) -> FastAPI:
         speech.add_sink(tts_sink)
     asr = AsrService(config.asr, lambda text: manager.handle_command_text(text, source="asr"))
 
-    app.state.config = config
-    app.state.manager = manager
-    app.state.asr = asr
-
-    @app.on_event("startup")
-    async def startup() -> None:
+    @asynccontextmanager
+    async def lifespan(_app: FastAPI):
         try:
             benchmark = await asyncio.to_thread(manager.benchmark_processing_capacity)
             logger.info("backend processing benchmark: %s", benchmark)
@@ -86,10 +103,18 @@ def create_app(config: AppConfig) -> FastAPI:
                 "error": str(exc),
             }
         await asr.start()
+        try:
+            yield
+        finally:
+            await asr.stop()
 
-    @app.on_event("shutdown")
-    async def shutdown() -> None:
-        await asr.stop()
+    app = FastAPI(title=config.web.title, lifespan=lifespan)
+    web_dir = Path(__file__).resolve().parent
+    static_dir = web_dir / "static"
+    app.mount("/static", StaticFiles(directory=static_dir), name="static")
+    app.state.config = config
+    app.state.manager = manager
+    app.state.asr = asr
 
     @app.get("/", response_class=HTMLResponse)
     async def index() -> str:
@@ -166,16 +191,32 @@ def create_app(config: AppConfig) -> FastAPI:
 
     @app.websocket("/ws/device/control")
     async def ws_device_control(ws: WebSocket) -> None:
-        await ws.accept()
-        await manager.replace_device_ws("control", ws)
-        await manager.broadcast({"kind": "device", "channel": "control", "connected": True})
-        await manager.sync_device_config()
         try:
+            await ws.accept()
+            await manager.replace_device_ws("control", ws)
+            await manager.broadcast({"kind": "device", "channel": "control", "connected": True})
+            await manager.sync_device_config()
             while True:
                 data = await ws.receive_bytes()
-                await manager.handle_control_packet(Packet.unpack(data))
+                packet = await _unpack_device_packet(
+                    data,
+                    channel="control",
+                    max_payload_bytes=CONTROL_MAX_PAYLOAD_BYTES,
+                    manager=manager,
+                )
+                if packet is None:
+                    continue
+                await manager.handle_control_packet(packet)
         except WebSocketDisconnect:
             logger.info("device control websocket disconnected")
+        except RuntimeError as exc:
+            if not _is_websocket_state_error(exc):
+                logger.exception("device control websocket failed")
+                await manager.broadcast(
+                    {"kind": "device_error", "channel": "control", "error": str(exc)}
+                )
+            else:
+                logger.info("device control websocket disconnected: %s", exc)
         except Exception as exc:
             logger.exception("device control websocket failed")
             await manager.broadcast({"kind": "device_error", "channel": "control", "error": str(exc)})
@@ -187,23 +228,31 @@ def create_app(config: AppConfig) -> FastAPI:
 
     @app.websocket("/ws/device/video")
     async def ws_device_video(ws: WebSocket) -> None:
-        await ws.accept()
-        await manager.replace_device_ws("video", ws)
-        await manager.broadcast({"kind": "device", "channel": "video", "connected": True})
         try:
+            await ws.accept()
+            await manager.replace_device_ws("video", ws)
+            await manager.broadcast({"kind": "device", "channel": "video", "connected": True})
             while True:
                 data = await ws.receive_bytes()
-                try:
-                    packet = Packet.unpack(data)
-                except Exception as exc:
-                    logger.warning("dropping bad video packet: %s", exc)
-                    await manager.broadcast(
-                        {"kind": "device_error", "channel": "video", "error": str(exc)}
-                    )
+                packet = await _unpack_device_packet(
+                    data,
+                    channel="video",
+                    max_payload_bytes=VIDEO_MAX_PAYLOAD_BYTES,
+                    manager=manager,
+                )
+                if packet is None:
                     continue
                 await manager.handle_video_packet(packet)
         except WebSocketDisconnect:
             logger.info("device video websocket disconnected")
+        except RuntimeError as exc:
+            if not _is_websocket_state_error(exc):
+                logger.exception("device video websocket failed")
+                await manager.broadcast(
+                    {"kind": "device_error", "channel": "video", "error": str(exc)}
+                )
+            else:
+                logger.info("device video websocket disconnected: %s", exc)
         except Exception as exc:
             logger.exception("device video websocket failed")
             await manager.broadcast({"kind": "device_error", "channel": "video", "error": str(exc)})
@@ -215,17 +264,32 @@ def create_app(config: AppConfig) -> FastAPI:
 
     @app.websocket("/ws/device/audio-up")
     async def ws_device_audio(ws: WebSocket) -> None:
-        await ws.accept()
-        await manager.replace_device_ws("audio", ws)
-        await manager.broadcast({"kind": "device", "channel": "audio", "connected": True})
         try:
+            await ws.accept()
+            await manager.replace_device_ws("audio", ws)
+            await manager.broadcast({"kind": "device", "channel": "audio", "connected": True})
             while True:
                 data = await ws.receive_bytes()
-                packet = Packet.unpack(data)
+                packet = await _unpack_device_packet(
+                    data,
+                    channel="audio",
+                    max_payload_bytes=AUDIO_MAX_PAYLOAD_BYTES,
+                    manager=manager,
+                )
+                if packet is None:
+                    continue
                 await manager.handle_audio_packet(packet)
                 await asr.push_pcm16(packet.payload)
         except WebSocketDisconnect:
             logger.info("device audio websocket disconnected")
+        except RuntimeError as exc:
+            if not _is_websocket_state_error(exc):
+                logger.exception("device audio websocket failed")
+                await manager.broadcast(
+                    {"kind": "device_error", "channel": "audio", "error": str(exc)}
+                )
+            else:
+                logger.info("device audio websocket disconnected: %s", exc)
         except Exception as exc:
             logger.exception("device audio websocket failed")
             await manager.broadcast({"kind": "device_error", "channel": "audio", "error": str(exc)})
