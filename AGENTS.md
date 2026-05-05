@@ -20,12 +20,14 @@ This repository contains a Python backend and ESP32 firmware for AI glasses.
 - `uv run aiglasses-model-benchmark --config config.toml --warmup-rounds 15 --runs 100`: Measure stable latency.
 - `uv run python -m aiglasses.config.firmware_header --config config.toml`: Generate `firmware/include/generated_config.h`.
 - `uv run pio run -d firmware`: Build ESP32 firmware.
+- `uv run pio run -d firmware -t upload`: Upload ESP32 firmware through a locally connected serial port.
+- If local upload cannot access the ESP32 serial port, use PlatformIO Remote instead: first run `uv run pio remote device list`, pick the ESP32 USB/JTAG port (for example `/dev/ttyACM0`), then run `uv run pio remote run -d firmware -t upload --upload-port <port>`.
 - `uv run python -m unittest discover -s tests`: Run unit tests.
 - `uv run ruff check .`: Run Python lint checks.
 
 ## Coding Style & Naming Conventions
 
-Python targets 3.11+ and uses Ruff with a 100-character line length. Use 4-space indentation, type annotations for public functions, and clear module-level separation by responsibility.
+Python targets 3.12 and uses Ruff with a 100-character line length. Use 4-space indentation, type annotations for public functions, and clear module-level separation by responsibility.
 
 JavaScript in `src/aiglasses/web/static/` is plain browser JavaScript. Keep state updates explicit.
 
@@ -44,6 +46,10 @@ Backend startup is expected to block until vision models are warmed up and the s
 Use Conventional Commits v1.0.0: `<type>[optional scope]: <description>`. Prefer lowercase types such as `feat`, `fix`, `docs`, `test`, `refactor`, `perf`, `build`, `ci`, and `chore`. Examples: `feat(vision): add model benchmark CLI`, `fix(web): preserve ASR status`, `docs: update contributor guide`. Mark breaking changes with `!` or a `BREAKING CHANGE:` footer.
 
 Pull requests should include a concise description, affected areas, verification commands run, and screenshots for visible web UI changes. Mention firmware generation steps when relevant.
+
+## Review Workflow
+
+When the user invokes `/review`, immediately start `/codex:adversarial-review` in the background with the same raw `/review` arguments, continue the normal Claude review in parallel, then wait for both reviews to finish before responding. Verify each Codex finding against the current code before merging it into the final review; only include confirmed, applicable findings in the actionable findings list. Mark invalid or uncertain Codex findings as false positives or unconfirmed instead of treating them as actionable. Deduplicate overlapping issues, call out disagreements, and keep the result focused on actionable findings.
 
 ## Security & Configuration Tips
 

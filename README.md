@@ -25,9 +25,10 @@ cp config.example.toml config.toml
 - 后端给板子连接的 `public_base_url`
 - WiFi SSID/密码
 - 采集参数：
-  - `device.capture.frame_size`：摄像头分辨率，会写入固件生成头文件，例如 `VGA`、`QVGA`
+  - `device.capture.frame_size`：摄像头分辨率，会写入固件生成头文件，例如 `VGA`、`QVGA`、`SVGA`；生成器会同时按分辨率写入 `AGL_VIDEO_PACKET_CAPACITY`
   - `device.capture.video_fps`、`jpeg_quality`：视频上传帧率和 JPEG 质量
   - `device.capture.camera_profile`：固件相机调参配置，默认 `traffic_signal` 会压曝光和增益以保留红绿灯边缘
+  - `device.capture.audio_sample_rate`、`audio_chunk_ms`：设备上行 PCM16 音频参数；启用 ASR 时 `asr.sample_rate` 必须和设备采样率一致，且单个音频包不能超过后端 64 KiB 限制
 - DashScope ASR 配置：
   - `asr.dashscope_api_key`：DashScope API Key
   - `asr.websocket_base_url`：实时 ASR WebSocket 地址
@@ -154,11 +155,19 @@ uv run python -m aiglasses.config.firmware_header --config config.toml
 uv run pio run -d firmware
 ```
 
+上传到本地连接的设备：
+
+```bash
+uv run python -m aiglasses.config.firmware_header --config config.toml
+uv run pio run -d firmware -t upload
+```
+
 通过 PlatformIO Remote 上传：
 
 ```bash
 uv run python -m aiglasses.config.firmware_header --config config.toml
-uv run pio remote run -d firmware -e seeed_xiao_esp32s3 -t upload
+uv run pio remote device list
+uv run pio remote run -d firmware -t upload --upload-port /dev/ttyACM0
 ```
 
 远程串口监视：
@@ -167,7 +176,7 @@ uv run pio remote run -d firmware -e seeed_xiao_esp32s3 -t upload
 uv run pio remote device monitor -b 115200
 ```
 
-上传/构建前先运行 `aiglasses.config.firmware_header`，它会从 `config.toml` 生成 ignored 的 `firmware/include/generated_config.h`。
+上传/构建前先运行 `aiglasses.config.firmware_header`，它会从 `config.toml` 生成 ignored 的 `firmware/include/generated_config.h`。如果本地上传误识别到 `/dev/ttyS*` 或遇到串口权限问题，可用 `uv run pio remote device list` 找到带 USB VID/PID 的 ESP32 端口，再用 `--upload-port` 指定。
 
 如果修改了 WiFi、服务器地址或采集参数，必须重新生成 `generated_config.h` 后再编译/上传固件。
 
@@ -289,7 +298,7 @@ uv run pio run -d firmware
 - 已填写 `config.toml`
 - 后端可被 ESP32 访问
 - 模型目录已放入 `models/`
-- PlatformIO Remote Agent 可看到目标板子
+- PlatformIO Remote Agent 可看到目标板子；本地串口上传不可用时，用 `pio remote device list` 找到 ESP32 端口并通过 remote 上传
 
 ## 贡献
 
