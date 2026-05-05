@@ -253,6 +253,49 @@ class DeviceConfigTests(unittest.TestCase):
 
         self.assertEqual(snapshot["vision"], {"image_width": 16, "image_height": 12})
 
+    def test_malformed_control_json_broadcasts_error_and_keeps_running(self) -> None:
+        manager = DeviceManager(
+            vision=FakeVision(),
+            navigation=NavigationStateMachine(),
+            speech=SpeechHub(),
+        )
+        ui_ws = FakeUiWebSocket()
+        manager.ui_clients.add(ui_ws)
+
+        asyncio.run(
+            manager.handle_control_packet(Packet(PacketType.CONTROL_JSON, 1, 1234, b'{"bad"'))
+        )
+        asyncio.run(
+            manager.handle_control_packet(
+                Packet(PacketType.CONTROL_JSON, 2, 1235, b'{"kind":"hello"}')
+            )
+        )
+
+        error = json.loads(ui_ws.messages[-2])
+        self.assertEqual(error["kind"], "device_error")
+        self.assertEqual(error["channel"], "control")
+        self.assertEqual(error["packet_type"], "CONTROL_JSON")
+        self.assertIn("malformed device JSON", error["error"])
+        device = json.loads(ui_ws.messages[-1])
+        self.assertEqual(device["kind"], "device")
+        self.assertEqual(device["data"], {"kind": "hello"})
+
+    def test_invalid_utf8_imu_json_broadcasts_error(self) -> None:
+        manager = DeviceManager(
+            vision=object(),
+            navigation=NavigationStateMachine(),
+            speech=SpeechHub(),
+        )
+        ui_ws = FakeUiWebSocket()
+        manager.ui_clients.add(ui_ws)
+
+        asyncio.run(manager.handle_control_packet(Packet(PacketType.IMU_JSON, 1, 1234, b"\xff")))
+
+        error = json.loads(ui_ws.messages[-1])
+        self.assertEqual(error["kind"], "device_error")
+        self.assertEqual(error["packet_type"], "IMU_JSON")
+        self.assertIsNone(manager.last_imu)
+
 
 if __name__ == "__main__":
     unittest.main()

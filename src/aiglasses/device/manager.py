@@ -220,16 +220,51 @@ class DeviceManager:
 
     async def handle_control_packet(self, packet: Packet) -> None:
         if packet.packet_type == PacketType.IMU_JSON:
-            self.last_imu = json.loads(packet.payload.decode("utf-8"))
+            payload = await self._decode_device_json(packet, channel="control")
+            if payload is None:
+                return
+            self.last_imu = payload
             await self.broadcast({"kind": "imu", "data": self.last_imu})
         elif packet.packet_type in {PacketType.HELLO, PacketType.CONTROL_JSON}:
-            payload = json.loads(packet.payload.decode("utf-8") or "{}")
+            payload = await self._decode_device_json(packet, channel="control")
+            if payload is None:
+                return
             await self.broadcast({"kind": "device", "data": payload, "state": self.snapshot()})
         elif packet.packet_type == PacketType.PING:
             if self.control_ws:
                 await self.control_ws.send_bytes(
                     Packet(PacketType.PONG, packet.seq, int(time.time() * 1000)).pack()
                 )
+
+    async def _decode_device_json(
+        self,
+        packet: Packet,
+        *,
+        channel: str,
+    ) -> dict[str, Any] | None:
+        try:
+            payload = json.loads(packet.payload.decode("utf-8") or "{}")
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            await self.broadcast(
+                {
+                    "kind": "device_error",
+                    "channel": channel,
+                    "packet_type": packet.packet_type.name,
+                    "error": f"malformed device JSON: {exc}",
+                }
+            )
+            return None
+        if not isinstance(payload, dict):
+            await self.broadcast(
+                {
+                    "kind": "device_error",
+                    "channel": channel,
+                    "packet_type": packet.packet_type.name,
+                    "error": "malformed device JSON: payload must be an object",
+                }
+            )
+            return None
+        return payload
 
     async def handle_video_packet(self, packet: Packet) -> None:
         if packet.packet_type != PacketType.VIDEO_JPEG:

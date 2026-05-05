@@ -31,11 +31,16 @@ static constexpr int MAX_TARGET_VIDEO_FPS = 1000;
 #define AGL_CAMERA_PROFILE AGL_CAMERA_PROFILE_TRAFFIC_SIGNAL
 #endif
 
+#ifndef AGL_VIDEO_PACKET_CAPACITY
+#define AGL_VIDEO_PACKET_CAPACITY (240 * 1024)
+#endif
+
 static constexpr int AUDIO_BYTES_PER_CHUNK = AGL_AUDIO_SAMPLE_RATE * AGL_AUDIO_CHUNK_MS / 1000 * 2;
 static constexpr size_t PACKET_HEADER_SIZE = sizeof(PacketHeader);
 static constexpr size_t CONTROL_PACKET_CAPACITY = 1024;
-static constexpr size_t VIDEO_PACKET_CAPACITY = 240 * 1024;
+static constexpr size_t VIDEO_PACKET_CAPACITY = AGL_VIDEO_PACKET_CAPACITY;
 static constexpr size_t SPEECH_SAMPLES_PER_WRITE = 256;
+static constexpr size_t SPEECH_PCM16_MAX_PAYLOAD = 64 * 1024;
 
 WebsocketsClient wsControl;
 WebsocketsClient wsVideo;
@@ -63,7 +68,7 @@ SemaphoreHandle_t videoMutex = nullptr;
 SemaphoreHandle_t audioMutex = nullptr;
 
 bool fill_packet(uint8_t* packet, size_t capacity, PacketType type, uint64_t& seq, const uint8_t* payload, uint32_t len) {
-  if (!packet || PACKET_HEADER_SIZE + len > capacity) return false;
+  if (!packet || capacity < PACKET_HEADER_SIZE || len > capacity - PACKET_HEADER_SIZE) return false;
   write_packet_header(packet, type, seq++, payload, len);
   memcpy(packet + PACKET_HEADER_SIZE, payload, len);
   return true;
@@ -252,7 +257,9 @@ bool parse_packet_header(const uint8_t* data, size_t len, PacketHeader& header) 
   memcpy(&header, data, PACKET_HEADER_SIZE);
   if (memcmp(header.magic, "AGL1", 4) != 0) return false;
   if (header.version != 1) return false;
-  if (PACKET_HEADER_SIZE + header.payload_len != len) return false;
+  size_t payload_len = len - PACKET_HEADER_SIZE;
+  if (header.payload_len != payload_len) return false;
+  if (header.type == PKT_SPEECH_PCM16 && payload_len > SPEECH_PCM16_MAX_PAYLOAD) return false;
   const uint8_t* payload = data + PACKET_HEADER_SIZE;
   return crc32_update(0, payload, header.payload_len) == header.crc32;
 }
