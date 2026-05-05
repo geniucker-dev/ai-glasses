@@ -4,6 +4,8 @@ import argparse
 from pathlib import Path
 from urllib.parse import urlparse
 
+from aiglasses.protocol import MAX_PAYLOAD_BYTES
+
 from .settings import load_config
 
 
@@ -29,19 +31,43 @@ FRAME_SIZE_MACROS = {
     "UXGA": "FRAMESIZE_UXGA",
 }
 
+FRAME_SIZE_VIDEO_PACKET_CAPACITY = {
+    "96X96": 64 * 1024,
+    "QQVGA": 64 * 1024,
+    "QCIF": 64 * 1024,
+    "HQVGA": 96 * 1024,
+    "240X240": 96 * 1024,
+    "QVGA": 128 * 1024,
+    "CIF": 160 * 1024,
+    "HVGA": 192 * 1024,
+    "VGA": 240 * 1024,
+    "SVGA": 384 * 1024,
+    "XGA": 512 * 1024,
+    "HD": 768 * 1024,
+    "SXGA": 1024 * 1024,
+    "UXGA": MAX_PAYLOAD_BYTES,
+}
+
 CAMERA_PROFILE_MACROS = {
     "DEFAULT": "AGL_CAMERA_PROFILE_DEFAULT",
     "TRAFFIC_SIGNAL": "AGL_CAMERA_PROFILE_TRAFFIC_SIGNAL",
 }
 
 
-def _frame_size_macro(value: str) -> str:
+def _frame_size_key(value: str) -> str:
     key = value.strip().upper()
-    try:
-        return FRAME_SIZE_MACROS[key]
-    except KeyError as exc:
+    if key not in FRAME_SIZE_MACROS:
         choices = ", ".join(sorted(FRAME_SIZE_MACROS))
-        raise ValueError(f"unsupported device.capture.frame_size: {value!r}; choose one of: {choices}") from exc
+        raise ValueError(f"unsupported device.capture.frame_size: {value!r}; choose one of: {choices}")
+    return key
+
+
+def _frame_size_macro(value: str) -> str:
+    return FRAME_SIZE_MACROS[_frame_size_key(value)]
+
+
+def _video_packet_capacity(value: str) -> int:
+    return FRAME_SIZE_VIDEO_PACKET_CAPACITY[_frame_size_key(value)]
 
 
 def _camera_profile_macro(value: str) -> str:
@@ -55,11 +81,18 @@ def _camera_profile_macro(value: str) -> str:
         ) from exc
 
 
+def _server_endpoint(public_base_url: str) -> tuple[str, int]:
+    parsed = urlparse(public_base_url)
+    if parsed.scheme != "http":
+        raise ValueError("server.public_base_url must use http:// because firmware uses plain WebSocket")
+    if not parsed.hostname:
+        raise ValueError("server.public_base_url must include a hostname")
+    return parsed.hostname, parsed.port or 80
+
+
 def render_header(config_path: str | Path) -> str:
     config = load_config(config_path)
-    parsed = urlparse(config.server.public_base_url)
-    server_host = parsed.hostname or "127.0.0.1"
-    server_port = parsed.port or (443 if parsed.scheme == "https" else 80)
+    server_host, server_port = _server_endpoint(config.server.public_base_url)
     device = config.device
     capture = device.capture
 
@@ -71,6 +104,7 @@ def render_header(config_path: str | Path) -> str:
 #define AGL_SERVER_HOST {_cstr(server_host)}
 #define AGL_SERVER_PORT {int(server_port)}
 #define AGL_VIDEO_FPS {int(capture.video_fps)}
+#define AGL_VIDEO_PACKET_CAPACITY {_video_packet_capacity(capture.frame_size)}
 #define AGL_JPEG_QUALITY {int(capture.jpeg_quality)}
 #define AGL_FRAME_SIZE {_frame_size_macro(capture.frame_size)}
 #define AGL_CAMERA_PROFILE {_camera_profile_macro(capture.camera_profile)}

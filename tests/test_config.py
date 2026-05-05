@@ -66,6 +66,7 @@ class ConfigTests(unittest.TestCase):
         header = render_header("config.example.toml")
 
         self.assertIn("#define AGL_FRAME_SIZE FRAMESIZE_VGA", header)
+        self.assertIn("#define AGL_VIDEO_PACKET_CAPACITY 245760", header)
         self.assertIn("#define AGL_CAMERA_PROFILE AGL_CAMERA_PROFILE_TRAFFIC_SIGNAL", header)
 
     def test_firmware_header_maps_configured_frame_size(self) -> None:
@@ -76,6 +77,16 @@ class ConfigTests(unittest.TestCase):
             header = render_header(config_path)
 
         self.assertIn("#define AGL_FRAME_SIZE FRAMESIZE_QVGA", header)
+
+    def test_firmware_header_caps_large_video_packet_capacity_to_backend_limit(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = Path(tmp) / "config.toml"
+            config_path.write_text('[device.capture]\nframe_size = "UXGA"\n', encoding="utf-8")
+
+            header = render_header(config_path)
+
+        self.assertIn("#define AGL_FRAME_SIZE FRAMESIZE_UXGA", header)
+        self.assertIn("#define AGL_VIDEO_PACKET_CAPACITY 1048576", header)
 
     def test_firmware_header_maps_configured_camera_profile(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -95,6 +106,134 @@ class ConfigTests(unittest.TestCase):
             with self.assertRaises(FileNotFoundError) as ctx:
                 load_config(missing)
             self.assertIn("Copy config.example.toml", str(ctx.exception))
+
+    def test_top_level_unknown_section_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = Path(tmp) / "config.toml"
+            config_path.write_text('[spech]\nenabled = true\n', encoding="utf-8")
+
+            with self.assertRaisesRegex(ValueError, r"Unknown top-level config section: spech"):
+                load_config(config_path)
+
+    def test_asr_sample_rate_must_match_device_audio_sample_rate(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = Path(tmp) / "config.toml"
+            config_path.write_text(
+                '[device.capture]\naudio_sample_rate = 24000\n[asr]\nsample_rate = 16000\n',
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(
+                ValueError,
+                r"asr\.sample_rate must equal device\.capture\.audio_sample_rate",
+            ):
+                load_config(config_path)
+
+    def test_asr_sample_rate_mismatch_is_allowed_when_asr_disabled(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = Path(tmp) / "config.toml"
+            config_path.write_text(
+                '[device.capture]\naudio_sample_rate = 24000\n[asr]\nenabled = false\nsample_rate = 16000\n',
+                encoding="utf-8",
+            )
+
+            config = load_config(config_path)
+
+        self.assertFalse(config.asr.enabled)
+        self.assertEqual(config.device.capture.audio_sample_rate, 24000)
+        self.assertEqual(config.asr.sample_rate, 16000)
+
+    def test_invalid_firmware_numeric_config_is_rejected(self) -> None:
+        cases = {
+            "video_fps": 0,
+            "jpeg_quality": 64,
+            "audio_sample_rate": 0,
+            "audio_chunk_ms": 1001,
+            "imu_hz": 0,
+        }
+        for field, value in cases.items():
+            with self.subTest(field=field):
+                with tempfile.TemporaryDirectory() as tmp:
+                    config_path = Path(tmp) / "config.toml"
+                    config_path.write_text(
+                        f'[device.capture]\n{field} = {value}\n[asr]\nsample_rate = 16000\n',
+                        encoding="utf-8",
+                    )
+
+                    with self.assertRaisesRegex(ValueError, rf"device\.capture\.{field}"):
+                        load_config(config_path)
+
+    def test_device_id_is_required_and_length_limited(self) -> None:
+        cases = {
+            "empty": "",
+            "too_long": "x" * 129,
+        }
+        for name, device_id in cases.items():
+            with self.subTest(name=name):
+                with tempfile.TemporaryDirectory() as tmp:
+                    config_path = Path(tmp) / "config.toml"
+                    config_path.write_text(f'[device]\nid = "{device_id}"\n', encoding="utf-8")
+
+                    with self.assertRaisesRegex(ValueError, r"device\.id"):
+                        load_config(config_path)
+
+    def test_audio_chunk_larger_than_backend_limit_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = Path(tmp) / "config.toml"
+            config_path.write_text(
+                "[device.capture]\n"
+                "audio_sample_rate = 48000\n"
+                "audio_chunk_ms = 1000\n"
+                "[asr]\n"
+                "sample_rate = 48000\n",
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(ValueError, r"exceeding 65536"):
+                load_config(config_path)
+
+    def test_invalid_model_dimensions_are_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = Path(tmp) / "config.toml"
+            config_path.write_text('[models]\nimage_width = 0\n', encoding="utf-8")
+
+            with self.assertRaisesRegex(ValueError, r"models\.image_width"):
+                load_config(config_path)
+
+    def test_firmware_header_rejects_https_public_url(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = Path(tmp) / "config.toml"
+            config_path.write_text(
+                '[server]\npublic_base_url = "https://example.com:8443"\n',
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(ValueError, r"server\.public_base_url must use http://"):
+                render_header(config_path)
+
+    def test_firmware_header_rejects_missing_public_url_hostname(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = Path(tmp) / "config.toml"
+            config_path.write_text(
+                '[server]\npublic_base_url = "http:///missing"\n',
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(ValueError, r"server\.public_base_url must include a hostname"):
+                render_header(config_path)
+
+    def test_firmware_header_accepts_http_public_url(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = Path(tmp) / "config.toml"
+            config_path.write_text(
+                '[server]\npublic_base_url = "http://example.com:8081"\n',
+                encoding="utf-8",
+            )
+
+            header = render_header(config_path)
+
+        self.assertIn('#define AGL_SERVER_HOST "example.com"', header)
+        self.assertIn("#define AGL_SERVER_PORT 8081", header)
 
 
 if __name__ == "__main__":

@@ -3,6 +3,21 @@ from __future__ import annotations
 from dataclasses import dataclass, field, fields
 from pathlib import Path
 import tomllib
+from typing import Any
+
+
+TOP_LEVEL_SECTIONS = {
+    "server",
+    "device",
+    "models",
+    "vision",
+    "asr",
+    "speech",
+    "web",
+}
+AUDIO_MAX_PAYLOAD_BYTES = 64 * 1024
+BYTES_PER_PCM16_SAMPLE = 2
+DEVICE_ID_MAX_BYTES = 128
 
 
 @dataclass(frozen=True)
@@ -124,6 +139,55 @@ def _build_section(section_name: str, cls: type, data: dict):
     return cls(**data)
 
 
+def _validate_int_range(name: str, value: int, *, minimum: int, maximum: int | None = None) -> None:
+    if not isinstance(value, int) or isinstance(value, bool):
+        raise ValueError(f"Config value {name} must be an integer")
+    if value < minimum or (maximum is not None and value > maximum):
+        if maximum is None:
+            raise ValueError(f"Config value {name} must be >= {minimum}")
+        raise ValueError(f"Config value {name} must be between {minimum} and {maximum}")
+
+
+def _validate_config(config: AppConfig) -> None:
+    device_id_bytes = config.device.id.encode("utf-8")
+    if not device_id_bytes:
+        raise ValueError("Config value device.id must not be empty")
+    if len(device_id_bytes) > DEVICE_ID_MAX_BYTES:
+        raise ValueError(
+            f"Config value device.id must be at most {DEVICE_ID_MAX_BYTES} UTF-8 bytes"
+        )
+    capture = config.device.capture
+    _validate_int_range("device.capture.video_fps", capture.video_fps, minimum=1, maximum=1000)
+    _validate_int_range("device.capture.jpeg_quality", capture.jpeg_quality, minimum=1, maximum=63)
+    _validate_int_range("device.capture.audio_sample_rate", capture.audio_sample_rate, minimum=1)
+    _validate_int_range("device.capture.audio_chunk_ms", capture.audio_chunk_ms, minimum=1, maximum=1000)
+    _validate_int_range("device.capture.imu_hz", capture.imu_hz, minimum=1, maximum=1000)
+    _validate_int_range("models.image_width", config.models.image_width, minimum=1)
+    _validate_int_range("models.image_height", config.models.image_height, minimum=1)
+    _validate_int_range("asr.sample_rate", config.asr.sample_rate, minimum=1)
+    audio_chunk_bytes = (
+        capture.audio_sample_rate * capture.audio_chunk_ms * BYTES_PER_PCM16_SAMPLE // 1000
+    )
+    if audio_chunk_bytes > AUDIO_MAX_PAYLOAD_BYTES:
+        raise ValueError(
+            "Config values device.capture.audio_sample_rate and device.capture.audio_chunk_ms "
+            f"produce {audio_chunk_bytes} audio bytes per chunk, exceeding "
+            f"{AUDIO_MAX_PAYLOAD_BYTES}"
+        )
+    if config.asr.enabled and config.asr.sample_rate != capture.audio_sample_rate:
+        raise ValueError(
+            "Config value asr.sample_rate must equal device.capture.audio_sample_rate "
+            f"when asr.enabled=true ({config.asr.sample_rate} != {capture.audio_sample_rate})"
+        )
+
+
+def _reject_unknown_top_level_sections(raw: dict[str, Any]) -> None:
+    unknown = sorted(set(raw) - TOP_LEVEL_SECTIONS)
+    if unknown:
+        section_list = ", ".join(unknown)
+        raise ValueError(f"Unknown top-level config section: {section_list}")
+
+
 def load_config(path: str | Path = "config.toml") -> AppConfig:
     config_path = Path(path)
     if not config_path.exists():
@@ -133,6 +197,7 @@ def load_config(path: str | Path = "config.toml") -> AppConfig:
 
     with config_path.open("rb") as fh:
         raw = tomllib.load(fh)
+    _reject_unknown_top_level_sections(raw)
 
     device = _section(raw, "device")
     device_unknown = sorted(set(device) - {"id", "wifi", "capture", "audio_down"})
@@ -148,7 +213,7 @@ def load_config(path: str | Path = "config.toml") -> AppConfig:
         field_list = ", ".join(vision_unknown)
         raise ValueError(f"Unknown config field in [vision]: {field_list}")
 
-    return AppConfig(
+    config = AppConfig(
         path=config_path,
         server=_build_section("server", ServerConfig, _section(raw, "server")),
         device=DeviceConfig(
@@ -165,3 +230,5 @@ def load_config(path: str | Path = "config.toml") -> AppConfig:
         speech=_build_section("speech", SpeechConfig, _section(raw, "speech")),
         web=_build_section("web", WebConfig, _section(raw, "web")),
     )
+    _validate_config(config)
+    return config
