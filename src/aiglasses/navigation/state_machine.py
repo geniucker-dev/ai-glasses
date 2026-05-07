@@ -57,6 +57,13 @@ CROSSING_MIN_AREA_RATIO = 0.002
 CROSSING_AHEAD_BOTTOM_MIN = 0.25
 CROSSING_CORRIDOR_HALF_WIDTH = 0.55
 CROSSING_GREEN_REQUIRED_FRAMES = 2
+CROSSING_COMPLETION_MIN_ACTIVE_FRAMES = 4
+CROSSING_COMPLETION_BOTTOM_MAX = 0.35
+CROSSING_COMPLETION_MAX_AREA_RATIO = 0.08
+CROSSING_COMPLETION_REQUIRED_FRAMES = 3
+CROSSING_PROGRESS_BOTTOM_MIN = 0.70
+CROSSING_PROGRESS_MIN_AREA_RATIO = 0.12
+CROSSING_MAX_ACTIVE_SECONDS = 45.0
 
 CROSSING_VEHICLE_LABELS = {
     "bicycle",
@@ -88,6 +95,13 @@ class NavigationStateMachine:
         self._candidate_frames = 0
         self._last_guidance_spoken_at: float | None = None
         self._crossing_green_frames = 0
+        self._crossing_active = False
+        self._crossing_active_frames = 0
+        self._crossing_lost_crosswalk_frames = 0
+        self._crossing_clear_path_frames = 0
+        self._crossing_completion_candidate_frames = 0
+        self._crossing_saw_near_crosswalk = False
+        self._crossing_started_at: float | None = None
 
     def command(self, text: str) -> NavigationResult:
         normalized = text.strip()
@@ -134,6 +148,12 @@ class NavigationStateMachine:
             "candidate_speech": self._candidate_speech,
             "candidate_frames": self._candidate_frames,
             "crossing_green_frames": self._crossing_green_frames,
+            "crossing_active": self._crossing_active,
+            "crossing_active_frames": self._crossing_active_frames,
+            "crossing_lost_crosswalk_frames": self._crossing_lost_crosswalk_frames,
+            "crossing_clear_path_frames": self._crossing_clear_path_frames,
+            "crossing_completion_candidate_frames": self._crossing_completion_candidate_frames,
+            "crossing_saw_near_crosswalk": self._crossing_saw_near_crosswalk,
         }
 
     def _debounced_speech(self, speech: str | None) -> str | None:
@@ -171,7 +191,25 @@ class NavigationStateMachine:
         self._candidate_speech = ""
         self._candidate_frames = 0
         self._last_guidance_spoken_at = None
+        self._reset_crossing_progress()
+
+    def _reset_crossing_progress(self) -> None:
         self._crossing_green_frames = 0
+        self._crossing_active = False
+        self._crossing_active_frames = 0
+        self._crossing_lost_crosswalk_frames = 0
+        self._crossing_clear_path_frames = 0
+        self._crossing_completion_candidate_frames = 0
+        self._crossing_saw_near_crosswalk = False
+        self._crossing_started_at = None
+
+    def _pause_crossing_completion(self, *, reset_progress: bool = True) -> None:
+        self._crossing_green_frames = 0
+        self._crossing_lost_crosswalk_frames = 0
+        self._crossing_clear_path_frames = 0
+        self._crossing_completion_candidate_frames = 0
+        if reset_progress:
+            self._crossing_saw_near_crosswalk = False
 
     def _stop_current_mode(self) -> str:
         mode_to_stop = self.mode
@@ -204,6 +242,8 @@ class NavigationStateMachine:
                 "绿灯。",
                 "黄灯。",
                 "绿灯稳定，开始通行。",
+                "疑似已通过人行横道，请确认安全后停止过马路模式。",
+                "过马路时间较长，请确认周围安全，必要时停止过马路模式。",
             }
         )
 
@@ -398,31 +438,127 @@ class NavigationStateMachine:
     def _crossing_guidance(self, obs: dict[str, Any]) -> str | None:
         crosswalk = obs.get("crosswalk")
         light = obs.get("traffic_light")
+        vehicle_hazard = self._find_crossing_vehicle_hazard(obs)
+
         if light == "stop":
-            self._crossing_green_frames = 0
+            self._pause_crossing_completion(reset_progress=not self._crossing_active)
             return "红灯。"
         if light in {"countdown_go", "countdown_stop"}:
-            self._crossing_green_frames = 0
+            self._pause_crossing_completion(reset_progress=not self._crossing_active)
             return "黄灯。"
+        if vehicle_hazard:
+            self._pause_crossing_completion(reset_progress=not self._crossing_active)
+            if light == "go":
+                return "绿灯，但斑马线附近疑似有车辆通过，请先等待，确认安全后再过街。"
+            return "斑马线附近疑似有车辆通过，请先等待。"
+
+        if not self._crossing_active:
+            return self._pre_crossing_guidance(crosswalk, light)
+        return self._active_crossing_guidance(crosswalk, light)
+
+    def _pre_crossing_guidance(self, crosswalk: Any, light: Any) -> str | None:
         if light != "go":
             self._crossing_green_frames = 0
         if not crosswalk:
             self._crossing_green_frames = 0
             return "没看到斑马线，请原地小幅转动。"
         if light == "go":
-            if self._find_crossing_vehicle_hazard(obs):
-                self._crossing_green_frames = 0
-                return "绿灯，但斑马线附近疑似有车辆通过，请先等待，确认安全后再过街。"
-            self._crossing_green_frames += 1
-            if self._crossing_green_frames >= CROSSING_GREEN_REQUIRED_FRAMES:
-                return "绿灯稳定，开始通行。"
-            return None
+            if self._is_crossing_progress_evidence(crosswalk):
+                self._crossing_green_frames += 1
+                if self._crossing_green_frames >= CROSSING_GREEN_REQUIRED_FRAMES:
+                    self._start_active_crossing(crosswalk)
+                    return "绿灯稳定，开始通行。"
+                return None
+            self._crossing_green_frames = 0
         offset = float(crosswalk.get("center_offset", 0.0))
         if offset < -0.15:
             return "请向左转动。"
         if offset > 0.15:
             return "请向右转动。"
         return "发现斑马线，对准方向。"
+
+    def _start_active_crossing(self, crosswalk: Any) -> None:
+        self._crossing_active = True
+        self._crossing_active_frames = 0
+        self._crossing_lost_crosswalk_frames = 0
+        self._crossing_clear_path_frames = 0
+        self._crossing_completion_candidate_frames = 0
+        self._crossing_saw_near_crosswalk = self._is_crossing_progress_evidence(crosswalk)
+        self._crossing_started_at = float(self._clock())
+
+    def _active_crossing_guidance(self, crosswalk: Any, light: Any) -> str | None:
+        self._crossing_green_frames = CROSSING_GREEN_REQUIRED_FRAMES
+        self._crossing_active_frames += 1
+        self._crossing_clear_path_frames += 1
+        if crosswalk:
+            self._crossing_lost_crosswalk_frames = 0
+        else:
+            self._crossing_lost_crosswalk_frames += 1
+
+        if self._is_crossing_progress_evidence(crosswalk):
+            self._crossing_saw_near_crosswalk = True
+
+        if self._crossing_timed_out():
+            self._crossing_completion_candidate_frames = 0
+            return "过马路时间较长，请确认周围安全，必要时停止过马路模式。"
+        if self._is_crossing_completion_candidate(crosswalk, light):
+            self._crossing_completion_candidate_frames += 1
+        else:
+            self._crossing_completion_candidate_frames = 0
+
+        if self._crossing_completed():
+            self._crossing_completion_candidate_frames = 0
+            return "疑似已通过人行横道，请确认安全后停止过马路模式。"
+        return None
+
+    def _is_crossing_progress_evidence(self, crosswalk: Any) -> bool:
+        if not isinstance(crosswalk, dict):
+            return False
+        bottom = self._mask_bottom(crosswalk)
+        if bottom is None or bottom < CROSSING_PROGRESS_BOTTOM_MIN:
+            return False
+        area_ratio = self._mask_area_ratio(crosswalk)
+        return area_ratio is not None and area_ratio >= CROSSING_PROGRESS_MIN_AREA_RATIO
+
+    def _is_crossing_completion_candidate(self, crosswalk: Any, light: Any) -> bool:
+        if light in {"stop", "countdown_go", "countdown_stop"} or not self._crossing_saw_near_crosswalk:
+            return False
+        if not isinstance(crosswalk, dict):
+            return False
+        if self._crossing_active_frames < CROSSING_COMPLETION_MIN_ACTIVE_FRAMES:
+            return False
+        bottom = self._mask_bottom(crosswalk)
+        if bottom is None or bottom > CROSSING_COMPLETION_BOTTOM_MAX:
+            return False
+        area_ratio = self._mask_area_ratio(crosswalk)
+        return area_ratio is not None and area_ratio <= CROSSING_COMPLETION_MAX_AREA_RATIO
+
+    @staticmethod
+    def _mask_area_ratio(mask: dict[str, Any]) -> float | None:
+        try:
+            return float(mask["area_ratio"])
+        except (KeyError, TypeError, ValueError):
+            return None
+
+    @staticmethod
+    def _mask_bottom(mask: dict[str, Any]) -> float | None:
+        contour = mask.get("contour")
+        if not isinstance(contour, list) or not contour:
+            return None
+        ys = [
+            float(point[1])
+            for point in contour
+            if isinstance(point, (list, tuple)) and len(point) >= 2
+        ]
+        return max(ys, default=None)
+
+    def _crossing_completed(self) -> bool:
+        return self._crossing_completion_candidate_frames >= CROSSING_COMPLETION_REQUIRED_FRAMES
+
+    def _crossing_timed_out(self) -> bool:
+        if self._crossing_started_at is None:
+            return False
+        return float(self._clock()) - self._crossing_started_at >= CROSSING_MAX_ACTIVE_SECONDS
 
     def _find_crossing_vehicle_hazard(self, obs: dict[str, Any]) -> dict[str, Any] | None:
         center = self._mask_center_offset(obs.get("crosswalk") or obs.get("blind_path"))
