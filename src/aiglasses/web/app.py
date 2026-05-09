@@ -5,7 +5,7 @@ import base64
 from contextlib import asynccontextmanager
 import logging
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, Any
 
 from fastapi import Body, FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse, JSONResponse, Response
@@ -62,12 +62,15 @@ def validate_speech_config(config: AppConfig) -> None:
 def create_app(config: AppConfig) -> FastAPI:
     validate_speech_config(config)
     speech = SpeechHub()
-    navigation = NavigationStateMachine()
+    vision = VisionPipeline(config)
+    navigation = NavigationStateMachine(tuning=vision.tuning)
     manager = DeviceManager(
-        VisionPipeline(config),
+        vision,
         navigation,
         speech,
         target_video_fps=clamp_target_video_fps(config.device.capture.video_fps),
+        device_jpeg_quality=config.device.capture.jpeg_quality,
+        device_camera_profile=config.device.capture.camera_profile,
     )
     speech.add_sink(UiSpeechSink(manager.broadcast))
     if config.speech.enabled and config.speech.mode == "device":
@@ -106,6 +109,7 @@ def create_app(config: AppConfig) -> FastAPI:
         try:
             yield
         finally:
+            await manager.stop_recording()
             await asr.stop()
 
     app = FastAPI(title=config.web.title, lifespan=lifespan)
@@ -162,16 +166,61 @@ def create_app(config: AppConfig) -> FastAPI:
     async def device_config() -> dict:
         return manager.device_config_payload()
 
+    @app.get("/api/v1/recording/status")
+    async def recording_status() -> dict:
+        return {"recording": manager.recording_status()}
+
+    @app.post("/api/v1/recording/start")
+    async def start_recording() -> dict:
+        return {"recording": await manager.start_recording()}
+
+    @app.post("/api/v1/recording/stop")
+    async def stop_recording() -> dict:
+        return {"recording": await manager.stop_recording()}
+
     @app.post("/api/v1/device/config")
     async def update_device_config(payload: Annotated[dict, Body()]) -> dict:
-        raw_fps = payload.get("target_fps", payload.get("video_fps"))
-        if raw_fps is None:
-            raise HTTPException(status_code=400, detail="target_fps is required")
+        values: dict[str, Any] = {}
+        int_fields = {
+            "target_fps",
+            "video_fps",
+            "jpeg_quality",
+            "ae_level",
+            "saturation",
+            "contrast",
+            "sharpness",
+            "gainceiling",
+        }
+        for field in int_fields:
+            if field not in payload:
+                continue
+            try:
+                values[field] = int(payload[field])
+            except (TypeError, ValueError) as exc:
+                raise HTTPException(status_code=400, detail=f"{field} must be an integer") from exc
+        video_fps = values.pop("video_fps", None)
+        if video_fps is not None and "target_fps" not in values:
+            values["target_fps"] = video_fps
+        if "camera_profile" in payload:
+            values["camera_profile"] = str(payload["camera_profile"])
+        if not values:
+            raise HTTPException(status_code=400, detail="no device config fields provided")
+        return await manager.update_device_config(**values)
+
+    @app.get("/api/v1/debug/tuning")
+    async def debug_tuning() -> dict:
+        return {"tuning": manager.vision.tuning.to_dict()}
+
+    @app.post("/api/v1/debug/tuning")
+    async def update_debug_tuning(payload: Annotated[dict, Body()]) -> dict:
         try:
-            target_fps = int(raw_fps)
+            tuning = manager.vision.tuning.updated(payload)
         except (TypeError, ValueError) as exc:
-            raise HTTPException(status_code=400, detail="target_fps must be an integer") from exc
-        return await manager.update_device_config(target_fps=target_fps)
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        manager.vision.tuning = tuning
+        manager.navigation.tuning = tuning
+        await manager.broadcast({"kind": "tuning", "tuning": tuning.to_dict()})
+        return {"tuning": tuning.to_dict()}
 
     @app.post("/api/v1/device/disconnect")
     async def disconnect_device() -> dict:

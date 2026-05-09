@@ -5,6 +5,8 @@ from enum import StrEnum
 import time
 from typing import Any, Callable
 
+from aiglasses.vision.tuning import VisionTuning
+
 
 class NavigationMode(StrEnum):
     IDLE = "idle"
@@ -87,8 +89,14 @@ class NavigationResult:
 
 
 class NavigationStateMachine:
-    def __init__(self, *, clock: Callable[[], float] = time.monotonic) -> None:
+    def __init__(
+        self,
+        *,
+        clock: Callable[[], float] = time.monotonic,
+        tuning: VisionTuning | None = None,
+    ) -> None:
         self.mode = NavigationMode.IDLE
+        self.tuning = tuning or VisionTuning()
         self.last_speech = ""
         self._clock = clock
         self._candidate_speech = ""
@@ -147,6 +155,7 @@ class NavigationStateMachine:
             "last_speech": self.last_speech,
             "candidate_speech": self._candidate_speech,
             "candidate_frames": self._candidate_frames,
+            "tuning": self.tuning.to_dict(),
             "crossing_green_frames": self._crossing_green_frames,
             "crossing_active": self._crossing_active,
             "crossing_active_frames": self._crossing_active_frames,
@@ -465,7 +474,7 @@ class NavigationStateMachine:
         if light == "go":
             if self._is_crossing_progress_evidence(crosswalk):
                 self._crossing_green_frames += 1
-                if self._crossing_green_frames >= CROSSING_GREEN_REQUIRED_FRAMES:
+                if self._crossing_green_frames >= self.tuning.crossing_green_required_frames:
                     self._start_active_crossing(crosswalk)
                     return "绿灯稳定，开始通行。"
                 return None
@@ -487,7 +496,7 @@ class NavigationStateMachine:
         self._crossing_started_at = float(self._clock())
 
     def _active_crossing_guidance(self, crosswalk: Any, light: Any) -> str | None:
-        self._crossing_green_frames = CROSSING_GREEN_REQUIRED_FRAMES
+        self._crossing_green_frames = self.tuning.crossing_green_required_frames
         self._crossing_active_frames += 1
         self._crossing_clear_path_frames += 1
         if crosswalk:

@@ -4,7 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>AI Glasses Console</title>
-    <link rel="stylesheet" href="/static/styles.css?v=20260504-device-disconnect" />
+    <link rel="stylesheet" href="/static/styles.css?v=20260509-client-speech-toggle" />
   </head>
   <body>
     <main class="shell">
@@ -44,17 +44,63 @@
             <input id="commandInput" type="text" placeholder="输入调试指令，例如：开始导航" autocomplete="off" />
             <button type="submit">Send</button>
           </form>
+          <div class="client-audio-control">
+            <button id="webSpeechToggle" class="web-speech-button" type="button" aria-pressed="true">网页播报 开</button>
+            <span id="webSpeechStatus" class="web-speech-status">仅本窗口</span>
+          </div>
+          <div class="recording-control">
+            <button id="recordingToggle" class="recording-button" type="button">开始录制</button>
+            <span id="recordingStatus" class="recording-status">未录制</span>
+          </div>
         </section>
 
         <section class="panel config-panel">
           <h2>设备</h2>
           <form id="deviceConfigForm" class="config-form">
-            <label for="targetFps">目标帧率</label>
-            <input id="targetFps" type="number" min="1" max="1000" step="1" inputmode="numeric" />
+            <label for="targetFps"><span>目标帧率</span><input id="targetFps" type="number" min="1" max="1000" step="1" inputmode="numeric" /></label>
+            <label for="jpegQuality"><span>JPEG质量</span><input id="jpegQuality" type="number" min="1" max="63" step="1" inputmode="numeric" /></label>
+            <label for="cameraProfile" class="full-row"><span>相机Profile</span><select id="cameraProfile">
+              <option value="traffic_signal">traffic_signal</option>
+              <option value="default">default</option>
+            </select></label>
+            <label for="aeLevel"><span>AE Level</span><input id="aeLevel" type="number" min="-2" max="2" step="1" /></label>
+            <label for="saturation"><span>Saturation</span><input id="saturation" type="number" min="-2" max="2" step="1" /></label>
+            <label for="contrast"><span>Contrast</span><input id="contrast" type="number" min="-2" max="2" step="1" /></label>
+            <label for="sharpness"><span>Sharpness</span><input id="sharpness" type="number" min="-2" max="2" step="1" /></label>
+            <label for="gainceiling" class="full-row"><span>Gain ceiling</span><input id="gainceiling" type="number" min="2" max="128" step="1" /></label>
             <button type="submit">Apply</button>
           </form>
           <button id="disconnectDevice" class="danger-button" type="button">断开设备连接</button>
           <p id="configStatus" class="config-status">--</p>
+        </section>
+
+        <section class="panel config-panel">
+          <h2>红绿灯调试</h2>
+          <div class="view-toggle">
+            <button id="allViewButton" type="button" class="active">全部视图</button>
+            <button id="trafficViewButton" type="button">红绿灯视图</button>
+          </div>
+          <form id="tuningForm" class="config-form">
+            <label for="trafficFilterEnabled"><span>滤波器</span><input id="trafficFilterEnabled" type="checkbox" /></label>
+            <label for="trafficLightConf"><span>模型threshold</span><input id="trafficLightConf" type="number" min="0" max="1" step="0.01" /></label>
+            <label for="trafficSignalClearMargin"><span>blank margin</span><input id="trafficSignalClearMargin" type="number" min="0" max="1" step="0.01" /></label>
+            <label for="trafficGoMinConf"><span>go threshold</span><input id="trafficGoMinConf" type="number" min="0" max="1" step="0.01" /></label>
+            <label for="trafficStopMinConf"><span>stop threshold</span><input id="trafficStopMinConf" type="number" min="0" max="1" step="0.01" /></label>
+            <label for="trafficYellowMinConf"><span>yellow threshold</span><input id="trafficYellowMinConf" type="number" min="0" max="1" step="0.01" /></label>
+            <label for="trafficConflictMargin"><span>conflict margin</span><input id="trafficConflictMargin" type="number" min="0" max="1" step="0.01" /></label>
+            <label for="trafficRoiEnabled"><span>ROI</span><input id="trafficRoiEnabled" type="checkbox" /></label>
+            <label for="trafficRoiXMin"><span>ROI x min</span><input id="trafficRoiXMin" type="number" min="0" max="1" step="0.01" /></label>
+            <label for="trafficRoiXMax"><span>ROI x max</span><input id="trafficRoiXMax" type="number" min="0" max="1" step="0.01" /></label>
+            <label for="trafficRoiYMin"><span>ROI y min</span><input id="trafficRoiYMin" type="number" min="0" max="1" step="0.01" /></label>
+            <label for="trafficRoiYMax"><span>ROI y max</span><input id="trafficRoiYMax" type="number" min="0" max="1" step="0.01" /></label>
+            <label for="trafficMinAreaRatio"><span>min area</span><input id="trafficMinAreaRatio" type="number" min="0" max="1" step="0.00001" /></label>
+            <label for="trafficMaxAreaRatio"><span>max area</span><input id="trafficMaxAreaRatio" type="number" min="0" max="1" step="0.001" /></label>
+            <label for="trafficPreferCenterWeight"><span>center weight</span><input id="trafficPreferCenterWeight" type="number" min="0" max="1" step="0.01" /></label>
+            <label for="crossingGreenRequiredFrames"><span>绿灯稳定帧</span><input id="crossingGreenRequiredFrames" type="number" min="1" max="10" step="1" /></label>
+            <button type="submit">Apply</button>
+          </form>
+          <p id="tuningStatus" class="config-status">--</p>
+          <pre id="trafficDebug" class="traffic-debug">{}</pre>
         </section>
 
         <section class="panel log-panel">
@@ -68,6 +114,6 @@
         </section>
       </aside>
     </main>
-    <script src="/static/app.js?v=20260504-device-disconnect" type="module"></script>
+    <script src="/static/app.js?v=20260509-client-speech-toggle" type="module"></script>
   </body>
 </html>

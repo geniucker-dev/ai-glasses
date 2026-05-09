@@ -36,6 +36,8 @@ class FrameAnalysis:
     traffic_light: str | None = None
     traffic_light_confidence: float = 0.0
     traffic_light_detection: Detection | None = None
+    traffic_light_candidates: list[Detection] = field(default_factory=list)
+    traffic_light_debug: dict[str, Any] = field(default_factory=dict)
     model_status: dict[str, str] = field(default_factory=dict)
     frame_width: int | None = None
     frame_height: int | None = None
@@ -52,6 +54,8 @@ class FrameAnalysis:
             "traffic_light_detection": (
                 self.traffic_light_detection.to_dict() if self.traffic_light_detection else None
             ),
+            "traffic_light_candidates": [item.to_dict() for item in self.traffic_light_candidates],
+            "traffic_light_debug": self.traffic_light_debug,
             "model_status": self.model_status,
             "frame_width": self.frame_width,
             "frame_height": self.frame_height,

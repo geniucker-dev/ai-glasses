@@ -213,18 +213,32 @@ h2 {
 }
 
 .side {
-  display: grid;
-  grid-template-rows: auto auto minmax(220px, 1fr) minmax(220px, 0.9fr);
+  display: flex;
+  flex-direction: column;
   gap: 18px;
   min-width: 0;
   min-height: 0;
-  overflow: hidden;
+  overflow-x: hidden;
+  overflow-y: auto;
+  padding-right: 2px;
 }
 
 .panel {
+  flex: 0 0 auto;
   padding: 16px;
   overflow: hidden;
   min-width: 0;
+  min-height: 0;
+}
+
+.config-panel {
+  display: flex;
+  flex-direction: column;
+}
+
+.config-panel .config-form,
+.config-panel .traffic-debug {
+  flex: 0 0 auto;
   min-height: 0;
 }
 
@@ -237,6 +251,120 @@ h2 {
   padding: 10px;
 }
 
+.client-audio-control,
+.recording-control {
+  display: grid;
+  grid-template-columns: 128px minmax(0, 1fr);
+  gap: 8px;
+  align-items: center;
+  margin-top: 8px;
+}
+
+.client-audio-control {
+  padding: 8px;
+  border: 1px solid rgba(197, 154, 33, 0.34);
+  background:
+    linear-gradient(135deg, rgba(197, 154, 33, 0.16), transparent 58%),
+    rgba(255, 255, 255, 0.52);
+}
+
+.web-speech-button {
+  position: relative;
+  overflow: hidden;
+  background: #163f2b;
+  color: #fff;
+  border-color: rgba(47, 156, 103, 0.72);
+}
+
+.web-speech-button::after {
+  content: "";
+  position: absolute;
+  right: 10px;
+  top: 50%;
+  width: 7px;
+  height: 18px;
+  border-right: 2px solid currentColor;
+  border-left: 2px solid currentColor;
+  opacity: 0.72;
+  transform: translateY(-50%);
+}
+
+.web-speech-button.is-muted {
+  background: rgba(18, 19, 15, 0.08);
+  color: var(--muted);
+  border-color: var(--line);
+}
+
+.web-speech-button.is-muted::before {
+  content: "";
+  position: absolute;
+  right: 9px;
+  top: 50%;
+  width: 24px;
+  height: 2px;
+  background: #b0352a;
+  transform: translateY(-50%) rotate(-35deg);
+}
+
+.web-speech-status {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 700;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.recording-button {
+  position: relative;
+  background: rgba(228, 87, 46, 0.12);
+  color: var(--ink);
+  border-color: rgba(228, 87, 46, 0.42);
+}
+
+.recording-button.is-recording {
+  padding-left: 30px;
+  background: #b0352a;
+  color: #fff;
+  border-color: #b0352a;
+}
+
+.recording-button.is-recording::before {
+  content: "";
+  position: absolute;
+  left: 12px;
+  top: 50%;
+  width: 9px;
+  height: 9px;
+  border-radius: 999px;
+  background: #fff;
+  transform: translateY(-50%);
+  animation: recording-pulse 1s infinite;
+}
+
+.recording-status {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 700;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+@keyframes recording-pulse {
+  0%, 100% {
+    opacity: 1;
+    transform: translateY(-50%) scale(1);
+  }
+
+  50% {
+    opacity: 0.42;
+    transform: translateY(-50%) scale(0.72);
+  }
+}
+
 form {
   display: grid;
   grid-template-columns: 1fr 84px;
@@ -244,17 +372,36 @@ form {
 }
 
 .config-form {
-  grid-template-columns: minmax(84px, auto) minmax(0, 1fr) 84px;
-  align-items: center;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  align-items: end;
+  gap: 10px;
+  overflow: visible;
+  padding-right: 0;
 }
 
 .config-form label {
+  display: grid;
+  grid-template-rows: auto 42px;
+  gap: 5px;
+  min-width: 0;
   color: var(--muted);
-  font-size: 13px;
+  font-size: 12px;
   font-weight: 700;
 }
 
+.config-form label span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.config-form label.full-row,
+.config-form button[type="submit"] {
+  grid-column: 1 / -1;
+}
+
 .config-status {
+  flex: 0 0 auto;
   min-height: 18px;
   margin-top: 10px;
   color: var(--muted);
@@ -262,16 +409,26 @@ form {
 }
 
 input,
+select,
 button {
   height: 42px;
   min-width: 0;
+  max-width: 100%;
   border: 1px solid var(--line);
+  border-radius: 0;
   font: inherit;
 }
 
-input {
+input,
+select {
   padding: 0 12px;
   background: #fff;
+}
+
+input[type="checkbox"] {
+  width: 22px;
+  height: 22px;
+  justify-self: start;
 }
 
 button {
@@ -279,6 +436,7 @@ button {
   color: #fff;
   cursor: pointer;
   font-weight: 700;
+  white-space: nowrap;
 }
 
 button:disabled {
@@ -291,6 +449,35 @@ button:disabled {
   margin-top: 10px;
   border-color: rgba(176, 53, 42, 0.42);
   background: #b0352a;
+}
+
+.view-toggle {
+  flex: 0 0 auto;
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+.view-toggle button {
+  height: 34px;
+  border-radius: 999px;
+  background: rgba(47, 156, 103, 0.14);
+  color: var(--ink);
+}
+
+.view-toggle button.active {
+  background: var(--green);
+  color: #fff;
+}
+
+.traffic-debug {
+  max-height: 180px;
+  margin-top: 10px;
+  padding: 10px;
+  border: 1px solid var(--line);
+  background: rgba(255, 255, 255, 0.72);
+  overflow: auto;
 }
 
 .log {
@@ -372,6 +559,7 @@ pre {
     display: flex;
     flex-direction: column;
     overflow: visible;
+    padding-right: 0;
   }
 
   .metrics {
@@ -388,6 +576,15 @@ pre {
 
   .log-panel {
     min-height: 320px;
+  }
+
+  .config-panel {
+    max-height: none;
+  }
+
+  .config-panel .config-form {
+    flex: none;
+    overflow: visible;
   }
 
   .dense {
@@ -456,10 +653,34 @@ pre {
     border-bottom: 0;
   }
 
-  form,
-  .config-form {
+  form {
     grid-template-columns: minmax(0, 1fr) 76px;
     gap: 6px;
+  }
+
+  .config-form {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 10px;
+    overflow: visible;
+    padding-right: 0;
+  }
+
+  .config-form label,
+  .config-form label.full-row,
+  .config-form button[type="submit"] {
+    grid-column: 1 / -1;
+  }
+
+  .client-audio-control,
+  .recording-control {
+    grid-template-columns: 1fr;
+  }
+
+  .web-speech-button,
+  .web-speech-status,
+  .recording-button,
+  .recording-status {
+    width: 100%;
   }
 
   .command-panel form {
@@ -473,9 +694,5 @@ pre {
 
   .command-panel button {
     flex: 0 0 76px;
-  }
-
-  .config-form label {
-    grid-column: 1 / -1;
   }
 }

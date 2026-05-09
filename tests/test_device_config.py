@@ -1,7 +1,10 @@
 import asyncio
 from dataclasses import dataclass
 import json
+import tempfile
 import unittest
+from pathlib import Path
+from unittest.mock import patch
 
 from aiglasses.device import DeviceManager
 from aiglasses.navigation import NavigationStateMachine
@@ -58,6 +61,19 @@ class FakeVision:
 
 
 class DeviceConfigTests(unittest.TestCase):
+    def _expected_device_config(self, target_fps: int) -> dict[str, object]:
+        return {
+            "kind": "config",
+            "target_fps": target_fps,
+            "jpeg_quality": 12,
+            "camera_profile": "traffic_signal",
+            "ae_level": -1,
+            "saturation": 1,
+            "contrast": 1,
+            "sharpness": 1,
+            "gainceiling": 4,
+        }
+
     def test_update_device_config_pushes_target_fps(self) -> None:
         manager = DeviceManager(
             vision=object(),
@@ -70,8 +86,8 @@ class DeviceConfigTests(unittest.TestCase):
 
         result = asyncio.run(manager.update_device_config(target_fps=12))
 
-        self.assertEqual(result, {"config": {"kind": "config", "target_fps": 12}, "sent": True})
-        self.assertEqual(json.loads(ws.messages[-1]), {"kind": "config", "target_fps": 12})
+        self.assertEqual(result, {"config": self._expected_device_config(12), "sent": True})
+        self.assertEqual(json.loads(ws.messages[-1]), self._expected_device_config(12))
 
     def test_update_device_config_clamps_minimum(self) -> None:
         manager = DeviceManager(
@@ -83,7 +99,7 @@ class DeviceConfigTests(unittest.TestCase):
 
         result = asyncio.run(manager.update_device_config(target_fps=0))
 
-        self.assertEqual(result, {"config": {"kind": "config", "target_fps": 1}, "sent": False})
+        self.assertEqual(result, {"config": self._expected_device_config(1), "sent": False})
 
     def test_update_device_config_clamps_maximum(self) -> None:
         manager = DeviceManager(
@@ -95,7 +111,7 @@ class DeviceConfigTests(unittest.TestCase):
 
         result = asyncio.run(manager.update_device_config(target_fps=5000))
 
-        self.assertEqual(result, {"config": {"kind": "config", "target_fps": 1000}, "sent": False})
+        self.assertEqual(result, {"config": self._expected_device_config(1000), "sent": False})
 
     def test_failed_config_push_broadcasts_control_disconnect(self) -> None:
         manager = DeviceManager(
@@ -133,10 +149,10 @@ class DeviceConfigTests(unittest.TestCase):
         sent = asyncio.run(manager.sync_device_config())
 
         self.assertTrue(sent)
-        self.assertEqual(json.loads(ws.messages[-1]), {"kind": "config", "target_fps": 6})
+        self.assertEqual(json.loads(ws.messages[-1]), self._expected_device_config(6))
         self.assertEqual(
             json.loads(ui_ws.messages[-1]),
-            {"kind": "device_config", "config": {"kind": "config", "target_fps": 6}, "sent": True},
+            {"kind": "device_config", "config": self._expected_device_config(6), "sent": True},
         )
 
     def test_replace_device_ws_closes_previous_channel_connection(self) -> None:
@@ -223,6 +239,67 @@ class DeviceConfigTests(unittest.TestCase):
         self.assertEqual(message["kind"], "frame")
         self.assertEqual(message["frame_count"], 1)
         self.assertIn("received_fps_3s", message["video_stats"])
+
+    def test_recording_writes_raw_camera_jpeg_and_metadata(self) -> None:
+        manager = DeviceManager(
+            vision=FakeVision(),
+            navigation=NavigationStateMachine(),
+            speech=SpeechHub(),
+        )
+        ui_ws = FakeUiWebSocket()
+        manager.ui_clients.add(ui_ws)
+        camera_payload = b"\xff\xd8raw-camera-payload\xff\xd9"
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with patch("aiglasses.device.manager.RECORDINGS_DIR", Path(tmpdir)):
+                start_status = asyncio.run(manager.start_recording())
+                asyncio.run(
+                    manager.handle_video_packet(
+                        Packet(PacketType.VIDEO_JPEG, 10, 1234, camera_payload)
+                    )
+                )
+                stop_status = asyncio.run(manager.stop_recording())
+
+                recording_dir = Path(start_status["recording_dir"])
+                frame_bytes = (recording_dir / "frames" / "00000001.jpg").read_bytes()
+                metadata_text = (recording_dir / "metadata.jsonl").read_text(encoding="utf-8")
+                session = json.loads((recording_dir / "session.json").read_text(encoding="utf-8"))
+
+        self.assertFalse(stop_status["active"])
+        self.assertEqual(frame_bytes, camera_payload)
+        metadata = json.loads(metadata_text.strip())
+        self.assertEqual(metadata["recording_frame_index"], 1)
+        self.assertEqual(metadata["global_frame_count"], 1)
+        self.assertEqual(metadata["frame_file"], "frames/00000001.jpg")
+        self.assertEqual(metadata["jpeg_bytes"], len(camera_payload))
+        self.assertEqual(metadata["analysis"]["model_status"], {"fake": "ready"})
+        self.assertIn("navigation", metadata)
+        self.assertEqual(session["frame_count"], 1)
+        self.assertIsNotNone(session["stopped_at"])
+        recording_events = [json.loads(message) for message in ui_ws.messages if "recording" in message]
+        self.assertEqual(recording_events[0]["kind"], "recording")
+        self.assertTrue(recording_events[0]["recording"]["active"])
+        self.assertFalse(recording_events[-1]["recording"]["active"])
+
+    def test_recording_start_stop_are_idempotent(self) -> None:
+        manager = DeviceManager(
+            vision=FakeVision(),
+            navigation=NavigationStateMachine(),
+            speech=SpeechHub(),
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with patch("aiglasses.device.manager.RECORDINGS_DIR", Path(tmpdir)):
+                first = asyncio.run(manager.start_recording())
+                second = asyncio.run(manager.start_recording())
+                stopped = asyncio.run(manager.stop_recording())
+                stopped_again = asyncio.run(manager.stop_recording())
+
+        self.assertEqual(first["session_id"], second["session_id"])
+        self.assertTrue(first["active"])
+        self.assertTrue(second["active"])
+        self.assertFalse(stopped["active"])
+        self.assertFalse(stopped_again["active"])
 
     def test_processing_benchmark_uses_analyze_jpeg_path(self) -> None:
         vision = FakeVision()

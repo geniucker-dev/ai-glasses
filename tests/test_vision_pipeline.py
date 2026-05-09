@@ -7,6 +7,7 @@ import numpy as np
 
 from aiglasses.config import AppConfig
 from aiglasses.vision.pipeline import VisionPipeline
+from aiglasses.vision.tuning import VisionTuning, select_traffic_signal
 from aiglasses.vision.types import Detection
 from aiglasses.vision.yolo_postprocess import YoloOutput
 
@@ -28,6 +29,11 @@ class VisionPipelineTrafficLightTests(unittest.TestCase):
         pipeline.blind_model = None
         pipeline.obstacle_model = None
         pipeline.traffic_model = FakeTrafficModel(detections)
+        pipeline.tuning = VisionTuning(
+            traffic_go_min_conf=0.0,
+            traffic_stop_min_conf=0.99,
+            traffic_yellow_min_conf=0.99,
+        )
         return pipeline
 
     def test_traffic_light_ignores_weak_signal_under_much_stronger_blank(self) -> None:
@@ -74,6 +80,20 @@ class VisionPipelineTrafficLightTests(unittest.TestCase):
         self.assertIsNone(analysis.traffic_light)
         self.assertEqual(analysis.traffic_light_confidence, 0.0)
         self.assertIsNone(analysis.traffic_light_detection)
+
+    def test_center_weight_uses_frame_size_for_pixel_boxes(self) -> None:
+        tuning = VisionTuning(
+            traffic_go_min_conf=0.0,
+            traffic_prefer_center_weight=1.0,
+            traffic_roi_enabled=False,
+        )
+        left = Detection("go", 0.93, (0.0, 0.0, 20.0, 20.0), 0.01)
+        center = Detection("go", 0.86, (310.0, 0.0, 330.0, 20.0), 0.01)
+
+        selected, _debug = select_traffic_signal([left, center], tuning, width=640, height=480)
+
+        self.assertIsNotNone(selected)
+        self.assertEqual(selected.box, center.box)
 
 
 if __name__ == "__main__":

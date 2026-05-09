@@ -54,6 +54,13 @@ volatile bool videoReady = false;
 volatile bool audioReady = false;
 volatile bool helloPending = false;
 volatile int targetVideoFps = min(MAX_TARGET_VIDEO_FPS, max(1, AGL_VIDEO_FPS));
+volatile int runtimeJpegQuality = AGL_JPEG_QUALITY;
+volatile int runtimeAeLevel = -1;
+volatile int runtimeSaturation = 1;
+volatile int runtimeContrast = 1;
+volatile int runtimeSharpness = 1;
+volatile int runtimeGainceiling = GAINCEILING_4X;
+volatile bool runtimeTrafficSignalProfile = AGL_CAMERA_PROFILE == AGL_CAMERA_PROFILE_TRAFFIC_SIGNAL;
 uint64_t seqControl = 0;
 uint64_t seqVideo = 0;
 uint64_t seqAudio = 0;
@@ -99,24 +106,39 @@ bool send_packet(WebsocketsClient& ws, SemaphoreHandle_t mutex, PacketType type,
 void apply_camera_profile(sensor_t* s) {
   s->set_hmirror(s, 1);
   s->set_vflip(s, 0);
-  s->set_quality(s, AGL_JPEG_QUALITY);
+  s->set_quality(s, runtimeJpegQuality);
 
-#if AGL_CAMERA_PROFILE == AGL_CAMERA_PROFILE_TRAFFIC_SIGNAL
-  s->set_exposure_ctrl(s, 1);
-  s->set_gain_ctrl(s, 1);
-  s->set_whitebal(s, 1);
-  s->set_awb_gain(s, 1);
-  s->set_aec2(s, 1);
-  s->set_ae_level(s, -1);
-  s->set_gainceiling(s, GAINCEILING_4X);
-  s->set_saturation(s, 1);
-  s->set_contrast(s, 1);
-  s->set_sharpness(s, 1);
-  s->set_denoise(s, 1);
-  s->set_bpc(s, 1);
-  s->set_wpc(s, 1);
-  s->set_lenc(s, 1);
-#endif
+  if (runtimeTrafficSignalProfile) {
+    s->set_exposure_ctrl(s, 1);
+    s->set_gain_ctrl(s, 1);
+    s->set_whitebal(s, 1);
+    s->set_awb_gain(s, 1);
+    s->set_aec2(s, 1);
+    s->set_ae_level(s, runtimeAeLevel);
+    s->set_gainceiling(s, (gainceiling_t)runtimeGainceiling);
+    s->set_saturation(s, runtimeSaturation);
+    s->set_contrast(s, runtimeContrast);
+    s->set_sharpness(s, runtimeSharpness);
+    s->set_denoise(s, 1);
+    s->set_bpc(s, 1);
+    s->set_wpc(s, 1);
+    s->set_lenc(s, 1);
+  } else {
+    s->set_exposure_ctrl(s, 1);
+    s->set_gain_ctrl(s, 1);
+    s->set_whitebal(s, 1);
+    s->set_awb_gain(s, 1);
+    s->set_aec2(s, 0);
+    s->set_ae_level(s, 0);
+    s->set_gainceiling(s, GAINCEILING_2X);
+    s->set_saturation(s, 0);
+    s->set_contrast(s, 0);
+    s->set_sharpness(s, 0);
+    s->set_denoise(s, 0);
+    s->set_bpc(s, 0);
+    s->set_wpc(s, 1);
+    s->set_lenc(s, 1);
+  }
 }
 
 bool init_camera() {
@@ -239,17 +261,82 @@ bool read_json_int(const String& payload, const char* key, int& value) {
   return true;
 }
 
+bool read_json_string(const String& payload, const char* key, String& value) {
+  String needle = String("\"") + key + "\"";
+  int keyPos = payload.indexOf(needle);
+  if (keyPos < 0) return false;
+  int colonPos = payload.indexOf(':', keyPos + needle.length());
+  if (colonPos < 0) return false;
+  int pos = colonPos + 1;
+  while (pos < payload.length() && isspace((unsigned char)payload[pos])) pos++;
+  if (pos >= payload.length() || payload[pos] != '"') return false;
+  pos++;
+  int end = payload.indexOf('"', pos);
+  if (end < 0) return false;
+  value = payload.substring(pos, end);
+  return true;
+}
+
 int clamp_video_fps(int fps) {
   return min(MAX_TARGET_VIDEO_FPS, max(1, fps));
 }
 
+int gainceiling_value(int value) {
+  if (value <= 2) return GAINCEILING_2X;
+  if (value <= 4) return GAINCEILING_4X;
+  if (value <= 8) return GAINCEILING_8X;
+  if (value <= 16) return GAINCEILING_16X;
+  if (value <= 32) return GAINCEILING_32X;
+  if (value <= 64) return GAINCEILING_64X;
+  return GAINCEILING_128X;
+}
+
+void apply_runtime_camera_config() {
+  sensor_t* s = esp_camera_sensor_get();
+  if (!s) return;
+  apply_camera_profile(s);
+}
+
 void handle_control_message(const String& payload) {
-  int fps = 0;
-  if (!read_json_int(payload, "target_fps", fps) && !read_json_int(payload, "video_fps", fps)) {
-    return;
+  int value = 0;
+  bool cameraChanged = false;
+  if (read_json_int(payload, "target_fps", value) || read_json_int(payload, "video_fps", value)) {
+    targetVideoFps = clamp_video_fps(value);
+    Serial.printf("[CFG] target_fps=%d\n", targetVideoFps);
   }
-  targetVideoFps = clamp_video_fps(fps);
-  Serial.printf("[CFG] target_fps=%d\n", targetVideoFps);
+  if (read_json_int(payload, "jpeg_quality", value)) {
+    runtimeJpegQuality = min(63, max(1, value));
+    cameraChanged = true;
+    Serial.printf("[CFG] jpeg_quality=%d\n", runtimeJpegQuality);
+  }
+  if (read_json_int(payload, "ae_level", value)) {
+    runtimeAeLevel = min(2, max(-2, value));
+    cameraChanged = true;
+  }
+  if (read_json_int(payload, "saturation", value)) {
+    runtimeSaturation = min(2, max(-2, value));
+    cameraChanged = true;
+  }
+  if (read_json_int(payload, "contrast", value)) {
+    runtimeContrast = min(2, max(-2, value));
+    cameraChanged = true;
+  }
+  if (read_json_int(payload, "sharpness", value)) {
+    runtimeSharpness = min(2, max(-2, value));
+    cameraChanged = true;
+  }
+  if (read_json_int(payload, "gainceiling", value)) {
+    runtimeGainceiling = gainceiling_value(value);
+    cameraChanged = true;
+  }
+  String profile;
+  if (read_json_string(payload, "camera_profile", profile)) {
+    runtimeTrafficSignalProfile = profile != "default";
+    cameraChanged = true;
+  }
+  if (cameraChanged) {
+    apply_runtime_camera_config();
+  }
 }
 
 bool parse_packet_header(const uint8_t* data, size_t len, PacketHeader& header) {

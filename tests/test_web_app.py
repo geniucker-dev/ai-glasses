@@ -5,7 +5,7 @@ from pathlib import Path
 from fastapi.testclient import TestClient
 
 from aiglasses.config import AppConfig, SpeechConfig
-from aiglasses.config.settings import AsrConfig
+from aiglasses.config.settings import AsrConfig, DeviceCaptureConfig
 from aiglasses.config.settings import DeviceAudioDownConfig, DeviceConfig
 from aiglasses.protocol import Packet, PacketType
 from aiglasses.web.app import CONTROL_MAX_PAYLOAD_BYTES, _unpack_device_packet, validate_speech_config
@@ -57,6 +57,111 @@ class WebAppTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json(), {"disconnected": ["control"], "state": {}})
+
+    def test_create_app_initializes_device_config_from_app_config(self) -> None:
+        from aiglasses.web.app import create_app
+
+        app = create_app(
+            AppConfig(
+                path=Path("config.toml"),
+                asr=AsrConfig(enabled=False),
+                device=DeviceConfig(
+                    capture=DeviceCaptureConfig(
+                        video_fps=9,
+                        jpeg_quality=20,
+                        camera_profile="default",
+                    )
+                ),
+            )
+        )
+
+        self.assertEqual(
+            app.state.manager.device_config_payload(),
+            {
+                "kind": "config",
+                "target_fps": 9,
+                "jpeg_quality": 20,
+                "camera_profile": "default",
+                "ae_level": -1,
+                "saturation": 1,
+                "contrast": 1,
+                "sharpness": 1,
+                "gainceiling": 4,
+            },
+        )
+
+    def test_device_config_accepts_target_fps_and_legacy_video_fps_together(self) -> None:
+        from aiglasses.web.app import create_app
+
+        app = create_app(AppConfig(path=Path("config.toml"), asr=AsrConfig(enabled=False)))
+        app.state.manager.benchmark_processing_capacity = lambda: {"status": "ready"}
+
+        with TestClient(app) as client:
+            response = client.post(
+                "/api/v1/device/config",
+                json={"target_fps": 7, "video_fps": 3},
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["config"]["target_fps"], 7)
+
+    def test_tuning_update_rejects_invalid_payload_without_partial_mutation(self) -> None:
+        from aiglasses.web.app import create_app
+
+        app = create_app(AppConfig(path=Path("config.toml"), asr=AsrConfig(enabled=False)))
+        app.state.manager.benchmark_processing_capacity = lambda: {"status": "ready"}
+        original = app.state.manager.vision.tuning.to_dict()
+
+        with TestClient(app) as client:
+            response = client.post(
+                "/api/v1/debug/tuning",
+                json={"traffic_go_min_conf": 0.2, "crossing_green_required_frames": "bad"},
+            )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(app.state.manager.vision.tuning.to_dict(), original)
+        self.assertIs(app.state.manager.navigation.tuning, app.state.manager.vision.tuning)
+
+    def test_tuning_update_rejects_invalid_boolean_without_partial_mutation(self) -> None:
+        from aiglasses.web.app import create_app
+
+        app = create_app(AppConfig(path=Path("config.toml"), asr=AsrConfig(enabled=False)))
+        app.state.manager.benchmark_processing_capacity = lambda: {"status": "ready"}
+        original = app.state.manager.vision.tuning.to_dict()
+
+        with TestClient(app) as client:
+            response = client.post(
+                "/api/v1/debug/tuning",
+                json={"traffic_go_min_conf": 0.2, "traffic_filter_enabled": "maybe"},
+            )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(app.state.manager.vision.tuning.to_dict(), original)
+
+    def test_recording_endpoints_delegate_to_manager(self) -> None:
+        from aiglasses.web.app import create_app
+
+        app = create_app(AppConfig(path=Path("config.toml"), asr=AsrConfig(enabled=False)))
+        app.state.manager.benchmark_processing_capacity = lambda: {"status": "ready"}
+        app.state.manager.recording_status = lambda: {"active": False, "frame_count": 0}
+
+        async def start_recording() -> dict:
+            return {"active": True, "frame_count": 0}
+
+        async def stop_recording() -> dict:
+            return {"active": False, "frame_count": 4}
+
+        app.state.manager.start_recording = start_recording
+        app.state.manager.stop_recording = stop_recording
+
+        with TestClient(app) as client:
+            status_response = client.get("/api/v1/recording/status")
+            start_response = client.post("/api/v1/recording/start")
+            stop_response = client.post("/api/v1/recording/stop")
+
+        self.assertEqual(status_response.json(), {"recording": {"active": False, "frame_count": 0}})
+        self.assertEqual(start_response.json(), {"recording": {"active": True, "frame_count": 0}})
+        self.assertEqual(stop_response.json(), {"recording": {"active": False, "frame_count": 4}})
 
     def test_device_speech_requires_audio_down(self) -> None:
         config = AppConfig(

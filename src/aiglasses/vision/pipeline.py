@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Sequence
+from typing import Any
 
 import cv2
 import numpy as np
@@ -10,34 +10,9 @@ from aiglasses.config import AppConfig
 
 from .obstacle_classes import OBSTACLE_LABELS, YOLOE_OBSTACLE_CLASS_NAMES
 from .torch_yolo import TorchYoloModel
+from .tuning import VisionTuning, default_vision_tuning, select_traffic_signal
 from .types import Detection, FrameAnalysis
 from .yolo_postprocess import ModelUnavailable, filter_detections
-
-
-NON_SIGNAL_TRAFFIC_LABELS = {None, "blank", "countdown_blank", "crossing"}
-TRAFFIC_SIGNAL_CLEAR_MARGIN = 0.10
-
-
-def _select_traffic_signal(detections: Sequence[Detection]) -> Detection | None:
-    signal_detection = max(
-        (det for det in detections if det.label not in NON_SIGNAL_TRAFFIC_LABELS),
-        key=lambda det: det.confidence,
-        default=None,
-    )
-    if signal_detection is None:
-        return None
-    non_signal_detection = max(
-        (det for det in detections if det.label in NON_SIGNAL_TRAFFIC_LABELS),
-        key=lambda det: det.confidence,
-        default=None,
-    )
-    if (
-        non_signal_detection is not None
-        and signal_detection.confidence + TRAFFIC_SIGNAL_CLEAR_MARGIN
-        < non_signal_detection.confidence
-    ):
-        return None
-    return signal_detection
 
 
 @dataclass
@@ -48,6 +23,7 @@ class VisionPipeline:
         size = (self.config.models.image_width, self.config.models.image_height)
         thresholds = self.config.vision_thresholds
         self.model_status: dict[str, str] = {}
+        self.tuning: VisionTuning = default_vision_tuning(thresholds.traffic_light_conf)
         self.blind_model = self._optional_model(
             "blind_path",
             self.config.models.blind_path,
@@ -95,12 +71,16 @@ class VisionPipeline:
 
     def analyze_frame(self, frame: np.ndarray) -> FrameAnalysis:
         status = dict(self.model_status)
+        if not hasattr(self, "tuning"):
+            self.tuning = default_vision_tuning(self.config.vision_thresholds.traffic_light_conf)
         blind_summary = None
         crosswalk_summary = None
         obstacles = []
         traffic_light = None
         traffic_conf = 0.0
         traffic_detection = None
+        traffic_candidates: list[Detection] = []
+        traffic_debug: dict[str, Any] = {"thresholds": self.tuning.to_dict()}
 
         if self.blind_model:
             try:
@@ -121,8 +101,15 @@ class VisionPipeline:
 
         if self.traffic_model:
             try:
+                self.traffic_model.confidence = self.tuning.traffic_light_conf
                 result = self.traffic_model.predict(frame)
-                traffic_detection = _select_traffic_signal(result.detections)
+                traffic_candidates = result.detections
+                traffic_detection, traffic_debug = select_traffic_signal(
+                    result.detections,
+                    self.tuning,
+                    width=self.config.models.image_width,
+                    height=self.config.models.image_height,
+                )
                 if traffic_detection:
                     traffic_light = traffic_detection.label
                     traffic_conf = traffic_detection.confidence
@@ -130,6 +117,7 @@ class VisionPipeline:
             except Exception as exc:
                 status["traffic_light"] = f"error: {exc}"
                 traffic_detection = None
+                traffic_debug = {"error": str(exc), "thresholds": self.tuning.to_dict()}
 
         analysis = FrameAnalysis(
             blind_path=blind_summary,
@@ -138,6 +126,8 @@ class VisionPipeline:
             traffic_light=traffic_light,
             traffic_light_confidence=traffic_conf,
             traffic_light_detection=traffic_detection,
+            traffic_light_candidates=traffic_candidates,
+            traffic_light_debug=traffic_debug,
             model_status=status,
             frame_width=self.config.models.image_width,
             frame_height=self.config.models.image_height,

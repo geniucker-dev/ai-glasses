@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import datetime, timezone
 import json
+import logging
+from pathlib import Path
 import statistics
 import time
 from dataclasses import dataclass, field
@@ -19,6 +22,10 @@ from aiglasses.vision import FrameAnalysis, VisionPipeline
 
 MAX_TARGET_VIDEO_FPS = 1000
 BENCHMARK_JPEG_QUALITY = 85
+RECORDINGS_DIR = Path("recordings")
+RECORDING_FORMAT_VERSION = 1
+
+logger = logging.getLogger("aiglasses.device")
 
 
 def clamp_target_video_fps(value: int) -> int:
@@ -43,6 +50,13 @@ class DeviceManager:
     last_analysis: FrameAnalysis | None = None
     last_imu: dict[str, Any] | None = None
     target_video_fps: int = 1
+    device_jpeg_quality: int = 12
+    device_camera_profile: str = "traffic_signal"
+    device_ae_level: int = -1
+    device_saturation: int = 1
+    device_contrast: int = 1
+    device_sharpness: int = 1
+    device_gainceiling: int = 4
     frame_count: int = 0
     audio_bytes: int = 0
     speech_seq: int = 0
@@ -52,6 +66,12 @@ class DeviceManager:
     backend_benchmark: dict[str, Any] = field(
         default_factory=lambda: {"status": "pending"}
     )
+    recording_active: bool = False
+    recording_dir: Path | None = None
+    recording_frames_dir: Path | None = None
+    recording_session_id: str | None = None
+    recording_started_at: str | None = None
+    recording_frame_count: int = 0
 
     async def add_ui(self, ws: WebSocket) -> None:
         self.ui_clients.add(ws)
@@ -158,7 +178,17 @@ class DeviceManager:
         return event
 
     def device_config_payload(self) -> dict[str, Any]:
-        return {"kind": "config", "target_fps": clamp_target_video_fps(self.target_video_fps)}
+        return {
+            "kind": "config",
+            "target_fps": clamp_target_video_fps(self.target_video_fps),
+            "jpeg_quality": self.device_jpeg_quality,
+            "camera_profile": self.device_camera_profile,
+            "ae_level": self.device_ae_level,
+            "saturation": self.device_saturation,
+            "contrast": self.device_contrast,
+            "sharpness": self.device_sharpness,
+            "gainceiling": self.device_gainceiling,
+        }
 
     async def send_device_config(self) -> bool:
         ws = self.control_ws
@@ -175,8 +205,36 @@ class DeviceManager:
                 )
             return False
 
-    async def update_device_config(self, *, target_fps: int) -> dict[str, Any]:
-        self.target_video_fps = clamp_target_video_fps(target_fps)
+    async def update_device_config(
+        self,
+        *,
+        target_fps: int | None = None,
+        jpeg_quality: int | None = None,
+        camera_profile: str | None = None,
+        ae_level: int | None = None,
+        saturation: int | None = None,
+        contrast: int | None = None,
+        sharpness: int | None = None,
+        gainceiling: int | None = None,
+    ) -> dict[str, Any]:
+        if target_fps is not None:
+            self.target_video_fps = clamp_target_video_fps(target_fps)
+        if jpeg_quality is not None:
+            self.device_jpeg_quality = min(63, max(1, int(jpeg_quality)))
+        if camera_profile is not None:
+            profile = str(camera_profile).strip()
+            if profile in {"default", "traffic_signal"}:
+                self.device_camera_profile = profile
+        if ae_level is not None:
+            self.device_ae_level = min(2, max(-2, int(ae_level)))
+        if saturation is not None:
+            self.device_saturation = min(2, max(-2, int(saturation)))
+        if contrast is not None:
+            self.device_contrast = min(2, max(-2, int(contrast)))
+        if sharpness is not None:
+            self.device_sharpness = min(2, max(-2, int(sharpness)))
+        if gainceiling is not None:
+            self.device_gainceiling = min(128, max(2, int(gainceiling)))
         sent = await self.send_device_config()
         config = self.device_config_payload()
         await self.broadcast({"kind": "device_config", "config": config, "sent": sent})
@@ -189,6 +247,97 @@ class DeviceManager:
                 {"kind": "device_config", "config": self.device_config_payload(), "sent": True}
             )
         return sent
+
+    def recording_status(self) -> dict[str, Any]:
+        return {
+            "active": self.recording_active,
+            "session_id": self.recording_session_id,
+            "recording_dir": str(self.recording_dir) if self.recording_dir is not None else None,
+            "frame_count": self.recording_frame_count,
+            "started_at": self.recording_started_at,
+        }
+
+    async def start_recording(self) -> dict[str, Any]:
+        if self.recording_active:
+            return self.recording_status()
+
+        now = datetime.now(timezone.utc)
+        session_id = now.strftime("%Y%m%d-%H%M%S")
+        recording_dir = RECORDINGS_DIR / session_id
+        suffix = 1
+        while recording_dir.exists():
+            suffix += 1
+            recording_dir = RECORDINGS_DIR / f"{session_id}-{suffix}"
+        frames_dir = recording_dir / "frames"
+        frames_dir.mkdir(parents=True, exist_ok=False)
+
+        self.recording_active = True
+        self.recording_dir = recording_dir
+        self.recording_frames_dir = frames_dir
+        self.recording_session_id = recording_dir.name
+        self.recording_started_at = now.isoformat()
+        self.recording_frame_count = 0
+        self._write_recording_session(stopped_at=None)
+        status = self.recording_status()
+        await self.broadcast({"kind": "recording", "recording": status})
+        return status
+
+    async def stop_recording(self) -> dict[str, Any]:
+        was_active = self.recording_active
+        if was_active:
+            self._write_recording_session(stopped_at=datetime.now(timezone.utc).isoformat())
+        self.recording_active = False
+        status = self.recording_status()
+        if was_active:
+            await self.broadcast({"kind": "recording", "recording": status})
+        return status
+
+    def _write_recording_session(self, *, stopped_at: str | None) -> None:
+        if self.recording_dir is None:
+            return
+        payload = {
+            "format": "aiglasses_raw_jpeg_recording",
+            "version": RECORDING_FORMAT_VERSION,
+            "session_id": self.recording_session_id,
+            "started_at": self.recording_started_at,
+            "stopped_at": stopped_at,
+            "frame_count": self.recording_frame_count,
+        }
+        tmp_path = self.recording_dir / "session.json.tmp"
+        final_path = self.recording_dir / "session.json"
+        tmp_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        tmp_path.replace(final_path)
+
+    async def _record_frame(self, jpeg_bytes: bytes) -> None:
+        if not self.recording_active or self.recording_frames_dir is None or self.recording_dir is None:
+            return
+        frame_index = self.recording_frame_count + 1
+        filename = f"{frame_index:08d}.jpg"
+        relative_frame = f"frames/{filename}"
+        frame_path = self.recording_frames_dir / filename
+        tmp_path = frame_path.with_name(f"{filename}.tmp")
+        metadata = {
+            "recording_frame_index": frame_index,
+            "global_frame_count": self.frame_count,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "frame_file": relative_frame,
+            "jpeg_bytes": len(jpeg_bytes),
+            "analysis": self.last_analysis.to_observation() if self.last_analysis is not None else None,
+            "navigation": self.navigation.snapshot(),
+            "tuning": self._vision_tuning_payload(),
+            "imu": self.last_imu,
+        }
+        try:
+            tmp_path.write_bytes(jpeg_bytes)
+            tmp_path.replace(frame_path)
+            with (self.recording_dir / "metadata.jsonl").open("a", encoding="utf-8") as metadata_file:
+                metadata_file.write(json.dumps(metadata, ensure_ascii=False, separators=(",", ":")))
+                metadata_file.write("\n")
+            self.recording_frame_count = frame_index
+        except Exception:
+            logger.exception("failed to write recording frame")
+            self.recording_active = False
+            await self.broadcast({"kind": "recording", "recording": self.recording_status()})
 
     async def send_speech_pcm16(self, pcm16: bytes, *, chunk_bytes: int = 3200) -> bool:
         if not pcm16:
@@ -290,6 +439,7 @@ class DeviceManager:
             )
             if nav.speech:
                 await self.speech.say(nav.speech)
+        await self._record_frame(packet.payload)
         await self.broadcast_bytes(
             Packet(
                 PacketType.VIDEO_JPEG,
@@ -303,6 +453,7 @@ class DeviceManager:
                 "kind": "frame",
                 "frame_count": self.frame_count,
                 "video_stats": self.video_stats(),
+                "recording": self.recording_status(),
             }
         )
 
@@ -411,6 +562,11 @@ class DeviceManager:
         if self.audio_bytes % (16000 * 2 * 5) < len(packet.payload):
             await self.broadcast({"kind": "audio", "bytes": self.audio_bytes})
 
+    def _vision_tuning_payload(self) -> dict[str, Any]:
+        tuning = getattr(getattr(self.vision, "tuning", None), "to_dict", None)
+        payload = tuning() if callable(tuning) else {}
+        return payload if isinstance(payload, dict) else {}
+
     def snapshot(self) -> dict[str, Any]:
         return {
             "uptime_s": round(time.time() - self.started_at, 1),
@@ -428,6 +584,8 @@ class DeviceManager:
             "vision": self.vision_frame_size(),
             "video_stats": self.video_stats(),
             "backend_benchmark": self.backend_benchmark,
+            "tuning": self._vision_tuning_payload(),
+            "recording": self.recording_status(),
         }
 
     def vision_frame_size(self) -> dict[str, int | None]:

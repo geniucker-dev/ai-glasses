@@ -12,6 +12,21 @@ const uptimeEl = document.querySelector("#uptime");
 const lightEl = document.querySelector("#light");
 const imuBriefEl = document.querySelector("#imuBrief");
 const targetFpsEl = document.querySelector("#targetFps");
+const jpegQualityEl = document.querySelector("#jpegQuality");
+const cameraProfileEl = document.querySelector("#cameraProfile");
+const aeLevelEl = document.querySelector("#aeLevel");
+const saturationEl = document.querySelector("#saturation");
+const contrastEl = document.querySelector("#contrast");
+const sharpnessEl = document.querySelector("#sharpness");
+const gainceilingEl = document.querySelector("#gainceiling");
+const tuningStatusEl = document.querySelector("#tuningStatus");
+const trafficDebugEl = document.querySelector("#trafficDebug");
+const webSpeechToggleButton = document.querySelector("#webSpeechToggle");
+const webSpeechStatusEl = document.querySelector("#webSpeechStatus");
+const recordingToggleButton = document.querySelector("#recordingToggle");
+const recordingStatusEl = document.querySelector("#recordingStatus");
+const allViewButton = document.querySelector("#allViewButton");
+const trafficViewButton = document.querySelector("#trafficViewButton");
 const configStatusEl = document.querySelector("#configStatus");
 const disconnectDeviceButton = document.querySelector("#disconnectDevice");
 const chips = {
@@ -32,12 +47,33 @@ let queuedFrameBlob = null;
 let frameLoading = false;
 let frameObjectUrl = "";
 let lastWsFrameAt = 0;
+let trafficOnlyView = false;
+let recordingActive = false;
+let webSpeechEnabled = window.localStorage.getItem("aiglasses.webSpeechEnabled") !== "false";
 const displayedFrameTimes = [];
 const displayFpsWindowMs = 3000;
 const maxTargetFps = 1000;
 const packetHeaderBytes = 32;
 const packetTypeVideoJpeg = 2;
 const defaultVisionFrame = { width: 640, height: 480 };
+const tuningFields = {
+  traffic_filter_enabled: { element: document.querySelector("#trafficFilterEnabled"), type: "boolean" },
+  traffic_light_conf: { element: document.querySelector("#trafficLightConf"), type: "number" },
+  traffic_signal_clear_margin: { element: document.querySelector("#trafficSignalClearMargin"), type: "number" },
+  traffic_go_min_conf: { element: document.querySelector("#trafficGoMinConf"), type: "number" },
+  traffic_stop_min_conf: { element: document.querySelector("#trafficStopMinConf"), type: "number" },
+  traffic_yellow_min_conf: { element: document.querySelector("#trafficYellowMinConf"), type: "number" },
+  traffic_conflict_margin: { element: document.querySelector("#trafficConflictMargin"), type: "number" },
+  traffic_roi_enabled: { element: document.querySelector("#trafficRoiEnabled"), type: "boolean" },
+  traffic_roi_x_min: { element: document.querySelector("#trafficRoiXMin"), type: "number" },
+  traffic_roi_x_max: { element: document.querySelector("#trafficRoiXMax"), type: "number" },
+  traffic_roi_y_min: { element: document.querySelector("#trafficRoiYMin"), type: "number" },
+  traffic_roi_y_max: { element: document.querySelector("#trafficRoiYMax"), type: "number" },
+  traffic_min_area_ratio: { element: document.querySelector("#trafficMinAreaRatio"), type: "number" },
+  traffic_max_area_ratio: { element: document.querySelector("#trafficMaxAreaRatio"), type: "number" },
+  traffic_prefer_center_weight: { element: document.querySelector("#trafficPreferCenterWeight"), type: "number" },
+  crossing_green_required_frames: { element: document.querySelector("#crossingGreenRequiredFrames"), type: "integer" },
+};
 
 function hasOwn(object, key) {
   return Object.prototype.hasOwnProperty.call(object, key);
@@ -89,6 +125,28 @@ function addLog(kind, text, source = "") {
   while (logEl.children.length > 80) logEl.lastChild.remove();
 }
 
+function setWebSpeechEnabled(enabled) {
+  webSpeechEnabled = Boolean(enabled);
+  window.localStorage.setItem("aiglasses.webSpeechEnabled", webSpeechEnabled ? "true" : "false");
+  if (webSpeechToggleButton) {
+    webSpeechToggleButton.textContent = webSpeechEnabled ? "网页播报 开" : "网页播报 关";
+    webSpeechToggleButton.classList.toggle("is-muted", !webSpeechEnabled);
+    webSpeechToggleButton.setAttribute("aria-pressed", webSpeechEnabled ? "true" : "false");
+  }
+  if (webSpeechStatusEl) {
+    webSpeechStatusEl.textContent = webSpeechEnabled ? "本窗口会播报" : "本窗口静音";
+  }
+}
+
+function speakInBrowser(text) {
+  if (!webSpeechEnabled || !text || !("speechSynthesis" in window)) return;
+  window.speechSynthesis.cancel();
+  const utterance = new SpeechSynthesisUtterance(text);
+  utterance.lang = "zh-CN";
+  utterance.rate = 1.05;
+  window.speechSynthesis.speak(utterance);
+}
+
 function renderStateJson() {
   stateEl.textContent = JSON.stringify(latestState, null, 2);
 }
@@ -99,9 +157,65 @@ function renderDeviceConfig(config, sent = null) {
   if (Number.isFinite(Number(config.target_fps))) {
     targetFpsEl.value = String(config.target_fps);
   }
+  if (Number.isFinite(Number(config.jpeg_quality))) jpegQualityEl.value = String(config.jpeg_quality);
+  if (config.camera_profile) cameraProfileEl.value = config.camera_profile;
+  if (Number.isFinite(Number(config.ae_level))) aeLevelEl.value = String(config.ae_level);
+  if (Number.isFinite(Number(config.saturation))) saturationEl.value = String(config.saturation);
+  if (Number.isFinite(Number(config.contrast))) contrastEl.value = String(config.contrast);
+  if (Number.isFinite(Number(config.sharpness))) sharpnessEl.value = String(config.sharpness);
+  if (Number.isFinite(Number(config.gainceiling))) gainceilingEl.value = String(config.gainceiling);
   const suffix = sent === null ? "" : sent ? "sent" : "pending";
   configStatusEl.textContent = suffix ? `target ${config.target_fps} fps · ${suffix}` : `target ${config.target_fps} fps`;
   renderStateJson();
+}
+
+function renderTuning(tuning) {
+  if (!tuning) return;
+  latestState = mergeState(latestState, { tuning });
+  Object.entries(tuningFields).forEach(([key, field]) => {
+    if (!field.element || !hasOwn(tuning, key)) return;
+    if (field.type === "boolean") field.element.checked = Boolean(tuning[key]);
+    else field.element.value = String(tuning[key]);
+  });
+  renderStateJson();
+}
+
+function normaliseRecordingStatus(payload) {
+  return payload?.recording || payload || {};
+}
+
+function renderRecordingStatus(payload) {
+  const status = normaliseRecordingStatus(payload);
+  recordingActive = Boolean(status.active);
+  latestState = mergeState(latestState, { recording: status });
+  if (recordingToggleButton) {
+    recordingToggleButton.textContent = recordingActive ? "停止录制" : "开始录制";
+    recordingToggleButton.classList.toggle("is-recording", recordingActive);
+    recordingToggleButton.setAttribute("aria-pressed", recordingActive ? "true" : "false");
+  }
+  if (recordingStatusEl) {
+    const frameCount = Number(status.frame_count || 0);
+    recordingStatusEl.textContent = recordingActive
+      ? `录制中 · ${frameCount} 帧 · ${status.session_id || "--"}`
+      : "未录制";
+    recordingStatusEl.title = status.recording_dir || "";
+  }
+  renderStateJson();
+}
+
+function renderTrafficDebug(observation) {
+  const debug = observation?.traffic_light_debug || {};
+  trafficDebugEl.textContent = JSON.stringify(
+    {
+      traffic_light: observation?.traffic_light || null,
+      selected: debug.selected || null,
+      reason: debug.reason || null,
+      filter_enabled: debug.filter_enabled,
+      candidates: debug.candidates || [],
+    },
+    null,
+    2,
+  );
 }
 
 function renderBackendFps(stats) {
@@ -118,6 +232,8 @@ function renderState(snapshot) {
   const incoming = snapshot || {};
   latestState = mergeState(latestState, incoming);
   if (incoming.device_config) renderDeviceConfig(incoming.device_config);
+  if (incoming.tuning) renderTuning(incoming.tuning);
+  if (incoming.recording) renderRecordingStatus(incoming.recording);
   renderStateJson();
   const device = latestState.device || {};
   setChip("control", device.control);
@@ -190,6 +306,17 @@ function drawOverlay() {
   colorOverlay(blind, "#2f9c67", "blind path");
   colorOverlay(crosswalk, "#e4572e", "crosswalk");
 
+  const trafficCandidates = latestObservation.traffic_light_candidates || [];
+  if (trafficOnlyView) {
+    ctx.strokeStyle = "rgba(56, 189, 248, 0.55)";
+    ctx.fillStyle = "rgba(56, 189, 248, 0.9)";
+    ctx.lineWidth = 2;
+    trafficCandidates.forEach((candidate) => drawDetectionBox(candidate, "#94a3b8"));
+    if (traffic?.box) drawDetectionBox(traffic, "#38bdf8", true);
+    drawTrafficRoi(rect);
+    return;
+  }
+
   ctx.strokeStyle = "#ffff00";
   ctx.fillStyle = "#ffff00";
   ctx.lineWidth = 3;
@@ -202,16 +329,37 @@ function drawOverlay() {
   });
 
   if (traffic?.box) {
-    const [x1, y1, x2, y2] = traffic.box;
-    const sx = rect.width / visionFrame.width;
-    const sy = rect.height / visionFrame.height;
-    const label = `${traffic.label} ${Math.round((traffic.confidence || 0) * 100)}%`;
-    ctx.strokeStyle = "#38bdf8";
-    ctx.fillStyle = "#38bdf8";
-    ctx.lineWidth = 3;
-    ctx.strokeRect(x1 * sx, y1 * sy, (x2 - x1) * sx, (y2 - y1) * sy);
-    ctx.fillText(label, x1 * sx + 4, Math.max(14, y1 * sy - 6));
+    drawDetectionBox(traffic, "#38bdf8", true);
   }
+}
+
+function drawDetectionBox(detection, color, selected = false) {
+  if (!detection?.box) return;
+  const rect = overlay.getBoundingClientRect();
+  const visionFrame = currentVisionFrameSize();
+  const [x1, y1, x2, y2] = detection.box;
+  const sx = rect.width / visionFrame.width;
+  const sy = rect.height / visionFrame.height;
+  const label = `${selected ? "* " : ""}${detection.label} ${Math.round((detection.confidence || 0) * 100)}%`;
+  ctx.strokeStyle = color;
+  ctx.fillStyle = color;
+  ctx.lineWidth = selected ? 4 : 2;
+  ctx.strokeRect(x1 * sx, y1 * sy, (x2 - x1) * sx, (y2 - y1) * sy);
+  ctx.fillText(label, x1 * sx + 4, Math.max(14, y1 * sy - 6));
+}
+
+function drawTrafficRoi(rect) {
+  const tuning = latestState.tuning || latestObservation?.traffic_light_debug?.thresholds;
+  if (!tuning?.traffic_roi_enabled) return;
+  const x = Number(tuning.traffic_roi_x_min) * rect.width;
+  const y = Number(tuning.traffic_roi_y_min) * rect.height;
+  const w = (Number(tuning.traffic_roi_x_max) - Number(tuning.traffic_roi_x_min)) * rect.width;
+  const h = (Number(tuning.traffic_roi_y_max) - Number(tuning.traffic_roi_y_min)) * rect.height;
+  ctx.strokeStyle = "#f97316";
+  ctx.lineWidth = 2;
+  ctx.setLineDash([6, 4]);
+  ctx.strokeRect(x, y, w, h);
+  ctx.setLineDash([]);
 }
 
 function currentVisionFrameSize() {
@@ -276,6 +424,70 @@ function showQueuedFrame() {
   requestFrame(queuedFrameCount);
 }
 
+async function loadRecordingStatus() {
+  try {
+    const res = await fetch("/api/v1/recording/status", { cache: "no-store" });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.detail || `HTTP ${res.status}`);
+    renderRecordingStatus(data);
+  } catch (error) {
+    if (recordingStatusEl) recordingStatusEl.textContent = error.message || "录制状态不可用";
+  }
+}
+
+async function toggleRecording() {
+  if (recordingToggleButton) recordingToggleButton.disabled = true;
+  try {
+    const endpoint = recordingActive ? "/api/v1/recording/stop" : "/api/v1/recording/start";
+    const res = await fetch(endpoint, { method: "POST" });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.detail || `HTTP ${res.status}`);
+    renderRecordingStatus(data);
+  } catch (error) {
+    if (recordingStatusEl) recordingStatusEl.textContent = error.message || "录制切换失败";
+    await loadRecordingStatus();
+  } finally {
+    if (recordingToggleButton) recordingToggleButton.disabled = false;
+  }
+}
+
+async function loadTuning() {
+  try {
+    const res = await fetch("/api/v1/debug/tuning", { cache: "no-store" });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.detail || `HTTP ${res.status}`);
+    renderTuning(data.tuning);
+    tuningStatusEl.textContent = "loaded";
+  } catch (error) {
+    tuningStatusEl.textContent = error.message || "tuning unavailable";
+  }
+}
+
+async function saveTuning(event) {
+  event.preventDefault();
+  const payload = {};
+  Object.entries(tuningFields).forEach(([key, field]) => {
+    if (!field.element) return;
+    if (field.type === "boolean") payload[key] = field.element.checked;
+    else if (field.type === "integer") payload[key] = Number.parseInt(field.element.value, 10);
+    else payload[key] = Number.parseFloat(field.element.value);
+  });
+  tuningStatusEl.textContent = "updating";
+  try {
+    const res = await fetch("/api/v1/debug/tuning", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.detail || `HTTP ${res.status}`);
+    renderTuning(data.tuning);
+    tuningStatusEl.textContent = "updated";
+  } catch (error) {
+    tuningStatusEl.textContent = error.message || "update failed";
+  }
+}
+
 async function loadDeviceConfig() {
   try {
     const res = await fetch("/api/v1/device/config", { cache: "no-store" });
@@ -297,13 +509,23 @@ async function saveDeviceConfig(event) {
     configStatusEl.textContent = `target fps must be <= ${maxTargetFps}`;
     return;
   }
+  const payload = {
+    target_fps: targetFps,
+    jpeg_quality: Number.parseInt(jpegQualityEl.value, 10),
+    camera_profile: cameraProfileEl.value,
+    ae_level: Number.parseInt(aeLevelEl.value, 10),
+    saturation: Number.parseInt(saturationEl.value, 10),
+    contrast: Number.parseInt(contrastEl.value, 10),
+    sharpness: Number.parseInt(sharpnessEl.value, 10),
+    gainceiling: Number.parseInt(gainceilingEl.value, 10),
+  };
 
   configStatusEl.textContent = "updating";
   try {
     const res = await fetch("/api/v1/device/config", {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ target_fps: targetFps }),
+      body: JSON.stringify(payload),
     });
     const data = await res.json();
     if (!res.ok) throw new Error(data.detail || `HTTP ${res.status}`);
@@ -442,6 +664,8 @@ function connectUi() {
     const msg = JSON.parse(event.data);
     if (msg.kind === "snapshot") renderState(msg.state);
     if (msg.kind === "device_config") renderDeviceConfig(msg.config, msg.sent);
+    if (msg.kind === "tuning") renderTuning(msg.tuning);
+    if (msg.kind === "recording") renderRecordingStatus(msg.recording);
     if (msg.kind === "asr") setAsrStatus(msg.status);
     if (msg.kind === "frame") {
       latestState = mergeState(latestState, {
@@ -449,13 +673,18 @@ function connectUi() {
         video_stats: msg.video_stats,
       });
       renderBackendFps(msg.video_stats);
+      if (msg.recording) renderRecordingStatus(msg.recording);
     }
-    if (msg.kind === "speech") addLog("speech", msg.text, msg.source);
+    if (msg.kind === "speech") {
+      addLog("speech", msg.text, msg.source);
+      speakInBrowser(msg.text);
+    }
     if (msg.kind === "command") addLog("command", msg.text, msg.source);
     if (msg.kind === "analysis") {
       latestObservation = msg.observation;
       renderState({ navigation: msg.navigation, frame_count: msg.frame_count });
       lightEl.textContent = msg.observation?.traffic_light || "--";
+      renderTrafficDebug(msg.observation);
       drawOverlay();
     }
     if (msg.kind === "imu") renderState({ imu: msg.data });
@@ -482,7 +711,25 @@ window.addEventListener("resize", drawOverlay);
 frameEl.addEventListener("load", recordDisplayedFrame);
 frameEl.addEventListener("error", handleFrameError);
 document.querySelector("#deviceConfigForm").addEventListener("submit", saveDeviceConfig);
+document.querySelector("#tuningForm").addEventListener("submit", saveTuning);
+allViewButton.addEventListener("click", () => {
+  trafficOnlyView = false;
+  allViewButton.classList.add("active");
+  trafficViewButton.classList.remove("active");
+  drawOverlay();
+});
+trafficViewButton.addEventListener("click", () => {
+  trafficOnlyView = true;
+  trafficViewButton.classList.add("active");
+  allViewButton.classList.remove("active");
+  drawOverlay();
+});
 disconnectDeviceButton.addEventListener("click", disconnectDevice);
+recordingToggleButton.addEventListener("click", toggleRecording);
+webSpeechToggleButton.addEventListener("click", () => setWebSpeechEnabled(!webSpeechEnabled));
+setWebSpeechEnabled(webSpeechEnabled);
 connectUi();
 loadDeviceConfig();
+loadTuning();
+loadRecordingStatus();
 refreshFrameFallback();
