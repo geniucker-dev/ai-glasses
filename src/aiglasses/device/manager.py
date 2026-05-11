@@ -24,12 +24,21 @@ MAX_TARGET_VIDEO_FPS = 1000
 BENCHMARK_JPEG_QUALITY = 85
 RECORDINGS_DIR = Path("recordings")
 RECORDING_FORMAT_VERSION = 1
+SUPERSEDED_WS_CLOSE_TIMEOUT_S = 1.0
 
 logger = logging.getLogger("aiglasses.device")
 
 
 def clamp_target_video_fps(value: int) -> int:
     return min(MAX_TARGET_VIDEO_FPS, max(1, int(value)))
+
+
+def _device_ws_locks() -> dict[str, asyncio.Lock]:
+    return {
+        "control": asyncio.Lock(),
+        "video": asyncio.Lock(),
+        "audio": asyncio.Lock(),
+    }
 
 
 @dataclass
@@ -72,6 +81,7 @@ class DeviceManager:
     recording_session_id: str | None = None
     recording_started_at: str | None = None
     recording_frame_count: int = 0
+    device_ws_locks: dict[str, asyncio.Lock] = field(default_factory=_device_ws_locks)
 
     async def add_ui(self, ws: WebSocket) -> None:
         self.ui_clients.add(ws)
@@ -108,34 +118,51 @@ class DeviceManager:
             self.ui_clients.discard(ws)
 
     async def replace_device_ws(self, channel: str, ws: WebSocket) -> None:
-        previous = self._device_ws(channel)
-        if previous is ws:
-            return
+        async with self.device_ws_locks[channel]:
+            previous = self._device_ws(channel)
+            if previous is ws:
+                return
+            self._set_device_ws(channel, ws)
         if previous is not None:
-            await self._close_ws(previous)
-        self._set_device_ws(channel, ws)
+            self._close_ws_soon(previous)
+
+    def _close_ws_soon(self, ws: WebSocket) -> asyncio.Task[None]:
+        async def close() -> None:
+            try:
+                await asyncio.wait_for(
+                    self._close_ws(ws),
+                    timeout=SUPERSEDED_WS_CLOSE_TIMEOUT_S,
+                )
+            except TimeoutError:
+                logger.warning("timed out closing superseded device websocket")
+            except Exception:
+                logger.exception("failed to close superseded device websocket")
+
+        return asyncio.create_task(close())
+
+    async def device_ws_is_current(self, channel: str, ws: WebSocket) -> bool:
+        async with self.device_ws_locks[channel]:
+            return self._device_ws(channel) is ws
 
     async def disconnect_device(self) -> dict[str, Any]:
-        channels = {
-            "control": self.control_ws,
-            "video": self.video_ws,
-            "audio": self.audio_ws,
-        }
         disconnected: list[str] = []
-        for channel, ws in channels.items():
-            if ws is None:
-                continue
-            self._set_device_ws(channel, None)
+        for channel in ("control", "video", "audio"):
+            async with self.device_ws_locks[channel]:
+                ws = self._device_ws(channel)
+                if ws is None:
+                    continue
+                self._set_device_ws(channel, None)
             await self._close_ws(ws)
             disconnected.append(channel)
             await self.broadcast({"kind": "device", "channel": channel, "connected": False})
         return {"disconnected": disconnected, "state": self.snapshot()}
 
-    def clear_device_ws(self, channel: str, ws: WebSocket) -> bool:
-        if self._device_ws(channel) is not ws:
-            return False
-        self._set_device_ws(channel, None)
-        return True
+    async def clear_device_ws(self, channel: str, ws: WebSocket) -> bool:
+        async with self.device_ws_locks[channel]:
+            if self._device_ws(channel) is not ws:
+                return False
+            self._set_device_ws(channel, None)
+            return True
 
     def _device_ws(self, channel: str) -> WebSocket | None:
         if channel == "control":

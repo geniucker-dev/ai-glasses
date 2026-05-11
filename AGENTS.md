@@ -49,7 +49,7 @@ Pull requests should include a concise description, affected areas, verification
 
 ## Review Workflow
 
-When the user invokes `/review`, immediately start the `/codex:adversarial-review` command in the background with the same raw `/review` arguments (this is a slash command, not an agent), continue the normal Claude review in parallel, then wait for both reviews to finish before responding. Verify each Codex finding against the current code before merging it into the final review; only include confirmed, applicable findings in the actionable findings list. Mark invalid or uncertain Codex findings as false positives or unconfirmed instead of treating them as actionable. Deduplicate overlapping issues, call out disagreements, and keep the result focused on actionable findings.
+When the user invokes `/review`, immediately start the `/codex:adversarial-review` command in the background with the same raw `/review` arguments (this is a slash command, not an agent), then perform the normal Claude review yourself immediately without waiting for Codex. After your own review is complete, wait for Codex to finish and merge both reviews into the final response. Treat both Claude and Codex findings as important: verify each finding against the current code before presenting it as actionable, mark invalid or uncertain findings as false positives or unconfirmed, deduplicate overlaps, call out disagreements, and keep the result focused on actionable findings.
 
 ## Security & Configuration Tips
 

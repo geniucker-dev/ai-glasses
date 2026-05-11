@@ -155,7 +155,7 @@ class DeviceConfigTests(unittest.TestCase):
             {"kind": "device_config", "config": self._expected_device_config(6), "sent": True},
         )
 
-    def test_replace_device_ws_closes_previous_channel_connection(self) -> None:
+    def test_replace_device_ws_schedules_previous_close_without_waiting(self) -> None:
         manager = DeviceManager(
             vision=object(),
             navigation=NavigationStateMachine(),
@@ -164,12 +164,72 @@ class DeviceConfigTests(unittest.TestCase):
         old_ws = FakeWebSocket()
         new_ws = FakeWebSocket()
         manager.control_ws = old_ws
+        close_started = asyncio.Event()
+        allow_close = asyncio.Event()
+        close_task: asyncio.Task[None] | None = None
 
-        asyncio.run(manager.replace_device_ws("control", new_ws))
+        async def close_previous(ws) -> None:
+            close_started.set()
+            await allow_close.wait()
+            await ws.close(code=1012)
 
+        async def run_scenario() -> None:
+            nonlocal close_task
+            with patch.object(manager, "_close_ws", side_effect=close_previous):
+                await manager.replace_device_ws("control", new_ws)
+                await close_started.wait()
+                close_tasks = [
+                    task for task in asyncio.all_tasks() if task is not asyncio.current_task()
+                ]
+                self.assertEqual(len(close_tasks), 1)
+                close_task = close_tasks[0]
+                self.assertFalse(close_task.done())
+                self.assertIs(manager.control_ws, new_ws)
+                allow_close.set()
+                await close_task
+
+        asyncio.run(run_scenario())
+
+        self.assertIsNotNone(close_task)
         self.assertIs(manager.control_ws, new_ws)
         self.assertTrue(old_ws.closed)
         self.assertEqual(old_ws.close_code, 1012)
+
+    def test_disconnect_waits_for_channel_replacement_to_finish(self) -> None:
+        manager = DeviceManager(
+            vision=FakeVision(),
+            navigation=NavigationStateMachine(),
+            speech=SpeechHub(),
+        )
+        old_ws = FakeWebSocket()
+        new_ws = FakeWebSocket()
+        manager.control_ws = old_ws
+        close_started = asyncio.Event()
+        allow_close = asyncio.Event()
+
+        async def close_previous(ws) -> None:
+            close_started.set()
+            await allow_close.wait()
+            await ws.close(code=1012)
+
+        async def run_scenario() -> dict[str, object]:
+            with patch.object(manager, "_close_ws", side_effect=close_previous):
+                replace_task = asyncio.create_task(manager.replace_device_ws("control", new_ws))
+                await close_started.wait()
+                disconnect_task = asyncio.create_task(manager.disconnect_device())
+                await asyncio.sleep(0)
+                self.assertFalse(disconnect_task.done())
+                allow_close.set()
+                await replace_task
+                return await disconnect_task
+
+        result = asyncio.run(run_scenario())
+
+        self.assertEqual(result["disconnected"], ["control"])
+        self.assertIsNone(manager.control_ws)
+        self.assertTrue(old_ws.closed)
+        self.assertTrue(new_ws.closed)
+        self.assertEqual(new_ws.close_code, 1012)
 
     def test_disconnect_device_closes_all_device_websockets(self) -> None:
         manager = DeviceManager(

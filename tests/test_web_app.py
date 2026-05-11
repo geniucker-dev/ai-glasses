@@ -8,12 +8,41 @@ from aiglasses.config import AppConfig, SpeechConfig
 from aiglasses.config.settings import AsrConfig, DeviceCaptureConfig
 from aiglasses.config.settings import DeviceAudioDownConfig, DeviceConfig
 from aiglasses.protocol import Packet, PacketType
-from aiglasses.web.app import CONTROL_MAX_PAYLOAD_BYTES, _unpack_device_packet, validate_speech_config
+from aiglasses.web.app import (
+    CONTROL_MAX_PAYLOAD_BYTES,
+    _receive_current_device_packet,
+    _unpack_device_packet,
+    validate_speech_config,
+)
 
 
 class FakeBroadcastManager:
     def __init__(self) -> None:
         self.messages: list[dict] = []
+
+    async def broadcast(self, message: dict) -> None:
+        self.messages.append(message)
+
+
+class FakeDeviceWebSocket:
+    def __init__(self, data: bytes) -> None:
+        self.data = data
+        self.receive_started = asyncio.Event()
+        self.allow_receive = asyncio.Event()
+
+    async def receive_bytes(self) -> bytes:
+        self.receive_started.set()
+        await self.allow_receive.wait()
+        return self.data
+
+
+class FakeCurrentManager:
+    def __init__(self, current: bool = True) -> None:
+        self.current = current
+        self.messages: list[dict] = []
+
+    async def device_ws_is_current(self, channel: str, ws: object) -> bool:
+        return self.current
 
     async def broadcast(self, message: dict) -> None:
         self.messages.append(message)
@@ -162,6 +191,54 @@ class WebAppTests(unittest.TestCase):
         self.assertEqual(status_response.json(), {"recording": {"active": False, "frame_count": 0}})
         self.assertEqual(start_response.json(), {"recording": {"active": True, "frame_count": 0}})
         self.assertEqual(stop_response.json(), {"recording": {"active": False, "frame_count": 4}})
+
+    def test_receive_current_device_packet_drops_packet_after_socket_is_superseded(self) -> None:
+        raw = Packet(PacketType.VIDEO_JPEG, seq=1, timestamp_ms=2, payload=b"jpeg").pack()
+        ws = FakeDeviceWebSocket(raw)
+        manager = FakeCurrentManager(current=True)
+
+        async def receive_after_supersede() -> object:
+            receive_task = asyncio.create_task(
+                _receive_current_device_packet(
+                    ws,
+                    manager=manager,
+                    channel="video",
+                    max_payload_bytes=CONTROL_MAX_PAYLOAD_BYTES,
+                )
+            )
+            await ws.receive_started.wait()
+            manager.current = False
+            ws.allow_receive.set()
+            return await receive_task
+
+        packet = asyncio.run(receive_after_supersede())
+
+        self.assertIsNone(packet)
+        self.assertEqual(manager.messages, [])
+
+    def test_receive_current_device_packet_returns_packet_for_current_socket(self) -> None:
+        raw = Packet(PacketType.CONTROL_JSON, seq=1, timestamp_ms=2, payload=b"{}").pack()
+        ws = FakeDeviceWebSocket(raw)
+        manager = FakeCurrentManager(current=True)
+
+        async def receive() -> object:
+            receive_task = asyncio.create_task(
+                _receive_current_device_packet(
+                    ws,
+                    manager=manager,
+                    channel="control",
+                    max_payload_bytes=CONTROL_MAX_PAYLOAD_BYTES,
+                )
+            )
+            await ws.receive_started.wait()
+            ws.allow_receive.set()
+            return await receive_task
+
+        packet = asyncio.run(receive())
+
+        self.assertIsNotNone(packet)
+        self.assertEqual(packet.payload, b"{}")
+        self.assertEqual(manager.messages, [])
 
     def test_device_speech_requires_audio_down(self) -> None:
         config = AppConfig(

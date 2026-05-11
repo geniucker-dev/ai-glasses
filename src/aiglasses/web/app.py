@@ -48,6 +48,27 @@ async def _unpack_device_packet(
         return None
 
 
+async def _receive_current_device_packet(
+    ws: WebSocket,
+    *,
+    manager: DeviceManager,
+    channel: str,
+    max_payload_bytes: int,
+) -> Packet | None:
+    data = await ws.receive_bytes()
+    if not await manager.device_ws_is_current(channel, ws):
+        return None
+    packet = await _unpack_device_packet(
+        data,
+        channel=channel,
+        max_payload_bytes=max_payload_bytes,
+        manager=manager,
+    )
+    if packet is None or not await manager.device_ws_is_current(channel, ws):
+        return None
+    return packet
+
+
 def validate_speech_config(config: AppConfig) -> None:
     if not config.speech.enabled:
         return
@@ -243,15 +264,19 @@ def create_app(config: AppConfig) -> FastAPI:
         try:
             await ws.accept()
             await manager.replace_device_ws("control", ws)
+            if not await manager.device_ws_is_current("control", ws):
+                return
             await manager.broadcast({"kind": "device", "channel": "control", "connected": True})
-            await manager.sync_device_config()
+            if not await manager.sync_device_config():
+                return
             while True:
-                data = await ws.receive_bytes()
-                packet = await _unpack_device_packet(
-                    data,
+                if not await manager.device_ws_is_current("control", ws):
+                    return
+                packet = await _receive_current_device_packet(
+                    ws,
+                    manager=manager,
                     channel="control",
                     max_payload_bytes=CONTROL_MAX_PAYLOAD_BYTES,
-                    manager=manager,
                 )
                 if packet is None:
                     continue
@@ -270,7 +295,7 @@ def create_app(config: AppConfig) -> FastAPI:
             logger.exception("device control websocket failed")
             await manager.broadcast({"kind": "device_error", "channel": "control", "error": str(exc)})
         finally:
-            if manager.clear_device_ws("control", ws):
+            if await manager.clear_device_ws("control", ws):
                 await manager.broadcast(
                     {"kind": "device", "channel": "control", "connected": False}
                 )
@@ -280,14 +305,17 @@ def create_app(config: AppConfig) -> FastAPI:
         try:
             await ws.accept()
             await manager.replace_device_ws("video", ws)
+            if not await manager.device_ws_is_current("video", ws):
+                return
             await manager.broadcast({"kind": "device", "channel": "video", "connected": True})
             while True:
-                data = await ws.receive_bytes()
-                packet = await _unpack_device_packet(
-                    data,
+                if not await manager.device_ws_is_current("video", ws):
+                    return
+                packet = await _receive_current_device_packet(
+                    ws,
+                    manager=manager,
                     channel="video",
                     max_payload_bytes=VIDEO_MAX_PAYLOAD_BYTES,
-                    manager=manager,
                 )
                 if packet is None:
                     continue
@@ -306,7 +334,7 @@ def create_app(config: AppConfig) -> FastAPI:
             logger.exception("device video websocket failed")
             await manager.broadcast({"kind": "device_error", "channel": "video", "error": str(exc)})
         finally:
-            if manager.clear_device_ws("video", ws):
+            if await manager.clear_device_ws("video", ws):
                 await manager.broadcast(
                     {"kind": "device", "channel": "video", "connected": False}
                 )
@@ -316,14 +344,17 @@ def create_app(config: AppConfig) -> FastAPI:
         try:
             await ws.accept()
             await manager.replace_device_ws("audio", ws)
+            if not await manager.device_ws_is_current("audio", ws):
+                return
             await manager.broadcast({"kind": "device", "channel": "audio", "connected": True})
             while True:
-                data = await ws.receive_bytes()
-                packet = await _unpack_device_packet(
-                    data,
+                if not await manager.device_ws_is_current("audio", ws):
+                    return
+                packet = await _receive_current_device_packet(
+                    ws,
+                    manager=manager,
                     channel="audio",
                     max_payload_bytes=AUDIO_MAX_PAYLOAD_BYTES,
-                    manager=manager,
                 )
                 if packet is None:
                     continue
@@ -343,7 +374,7 @@ def create_app(config: AppConfig) -> FastAPI:
             logger.exception("device audio websocket failed")
             await manager.broadcast({"kind": "device_error", "channel": "audio", "error": str(exc)})
         finally:
-            if manager.clear_device_ws("audio", ws):
+            if await manager.clear_device_ws("audio", ws):
                 await manager.broadcast(
                     {"kind": "device", "channel": "audio", "connected": False}
                 )
