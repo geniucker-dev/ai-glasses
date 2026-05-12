@@ -29,6 +29,7 @@ class VisionTuning:
     traffic_max_area_ratio: float = 0.10
     traffic_prefer_center_weight: float = 0.00
     crossing_green_required_frames: int = 2
+    crossing_obstacles_enabled: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)

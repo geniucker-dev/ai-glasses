@@ -67,19 +67,6 @@ CROSSING_PROGRESS_BOTTOM_MIN = 0.70
 CROSSING_PROGRESS_MIN_AREA_RATIO = 0.12
 CROSSING_MAX_ACTIVE_SECONDS = 45.0
 
-CROSSING_VEHICLE_LABELS = {
-    "bicycle",
-    "bike",
-    "motorcycle",
-    "motorbike",
-    "scooter",
-    "car",
-    "bus",
-    "truck",
-    "van",
-}
-
-
 @dataclass(frozen=True)
 class NavigationResult:
     mode: NavigationMode
@@ -245,11 +232,13 @@ class NavigationStateMachine:
             or speech.startswith("前方疑似有")
             or speech.startswith("前方盲道上")
             or speech.startswith("绿灯，但斑马线附近")
+            or speech.startswith("斑马线附近疑似有")
             or speech
             in {
                 "红灯。",
                 "绿灯。",
                 "黄灯。",
+                "前方到马路了，请先停下。",
                 "绿灯稳定，开始通行。",
                 "疑似已通过人行横道，请确认安全后停止过马路模式。",
                 "过马路时间较长，请确认周围安全，必要时停止过马路模式。",
@@ -258,15 +247,20 @@ class NavigationStateMachine:
 
     def _blind_path_guidance(self, obs: dict[str, Any]) -> str | None:
         blind = obs.get("blind_path")
+        crosswalk_ahead = self._is_blind_path_crosswalk_ahead(obs.get("crosswalk"))
         if not blind:
             obstacle = self._find_centered_near_obstacle(obs)
             if obstacle:
                 label = self._obstacle_speech_label(obstacle)
                 return f"前方疑似有{label}，请先停下。"
+            if crosswalk_ahead:
+                return "前方到马路了，请先停下。"
             return "没看到盲道，请原地小幅转动。"
         obstacle = self._find_blind_path_obstacle(obs)
         if obstacle:
             return f"前方盲道上疑似有{self._obstacle_speech_label(obstacle)}，请先停下。"
+        if crosswalk_ahead:
+            return "前方到马路了，请先停下。"
         offset = float(blind.get("center_offset", 0.0))
         angle = float(blind.get("angle_deg", 0.0))
         if offset < -0.18:
@@ -278,6 +272,12 @@ class NavigationStateMachine:
         if angle > 12:
             return "请向右转动。"
         return "保持直行。"
+
+    def _is_blind_path_crosswalk_ahead(self, crosswalk: Any) -> bool:
+        if not isinstance(crosswalk, dict):
+            return False
+        area_ratio = self._mask_area_ratio(crosswalk)
+        return area_ratio is None or area_ratio >= CROSSING_MIN_AREA_RATIO
 
     @staticmethod
     def _obstacle_speech_label(obstacle: dict[str, Any]) -> str:
@@ -447,7 +447,11 @@ class NavigationStateMachine:
     def _crossing_guidance(self, obs: dict[str, Any]) -> str | None:
         crosswalk = obs.get("crosswalk")
         light = obs.get("traffic_light")
-        vehicle_hazard = self._find_crossing_vehicle_hazard(obs)
+        obstacle_hazard = (
+            self._find_crossing_obstacle_hazard(obs)
+            if self.tuning.crossing_obstacles_enabled
+            else None
+        )
 
         if light == "stop":
             self._pause_crossing_completion(reset_progress=not self._crossing_active)
@@ -455,11 +459,9 @@ class NavigationStateMachine:
         if light in {"countdown_go", "countdown_stop"}:
             self._pause_crossing_completion(reset_progress=not self._crossing_active)
             return "黄灯。"
-        if vehicle_hazard:
+        if obstacle_hazard:
             self._pause_crossing_completion(reset_progress=not self._crossing_active)
-            if light == "go":
-                return "绿灯，但斑马线附近疑似有车辆通过，请先等待，确认安全后再过街。"
-            return "斑马线附近疑似有车辆通过，请先等待。"
+            return self._crossing_obstacle_wait_message(obstacle_hazard, light)
 
         if not self._crossing_active:
             return self._pre_crossing_guidance(crosswalk, light)
@@ -569,24 +571,27 @@ class NavigationStateMachine:
             return False
         return float(self._clock()) - self._crossing_started_at >= CROSSING_MAX_ACTIVE_SECONDS
 
-    def _find_crossing_vehicle_hazard(self, obs: dict[str, Any]) -> dict[str, Any] | None:
+    def _crossing_obstacle_wait_message(self, obstacle: dict[str, Any], light: Any) -> str:
+        label = self._obstacle_speech_label(obstacle)
+        if light == "go":
+            return f"绿灯，但斑马线附近疑似有{label}，请先等待，确认安全后再过街。"
+        return f"斑马线附近疑似有{label}，请先等待。"
+
+    def _find_crossing_obstacle_hazard(self, obs: dict[str, Any]) -> dict[str, Any] | None:
         center = self._mask_center_offset(obs.get("crosswalk") or obs.get("blind_path"))
         candidates = [
             obstacle
             for obstacle in self._obstacles(obs)
-            if self._is_crossing_vehicle_hazard(obstacle, obs, center)
+            if self._is_crossing_obstacle_hazard(obstacle, obs, center)
         ]
         return max(candidates, key=self._obstacle_priority, default=None)
 
-    def _is_crossing_vehicle_hazard(
+    def _is_crossing_obstacle_hazard(
         self,
         obstacle: dict[str, Any],
         obs: dict[str, Any],
         center_offset: float,
     ) -> bool:
-        label = str(obstacle.get("label") or "").strip().lower().replace("_", " ")
-        if label not in CROSSING_VEHICLE_LABELS:
-            return False
         if float(obstacle.get("confidence", 0.0)) < CROSSING_MIN_CONFIDENCE:
             return False
         if float(obstacle.get("area_ratio", 0.0)) < CROSSING_MIN_AREA_RATIO:

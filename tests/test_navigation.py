@@ -1,6 +1,7 @@
 import unittest
 
 from aiglasses.navigation import NavigationMode, NavigationStateMachine
+from aiglasses.vision.tuning import VisionTuning
 
 
 class NavigationTests(unittest.TestCase):
@@ -38,6 +39,18 @@ class NavigationTests(unittest.TestCase):
                 "contour": [(0.3, 0.10), (0.7, 0.10), (0.7, 0.30), (0.3, 0.30)],
             },
             "traffic_light": "go",
+        }
+
+    def _blind_path_crosswalk_observation(self) -> dict[str, object]:
+        return {
+            "frame_width": 640,
+            "frame_height": 480,
+            "blind_path": {"center_offset": 0.0, "angle_deg": 0},
+            "crosswalk": {
+                "center_offset": 0.0,
+                "area_ratio": 0.04,
+                "contour": [(0.25, 0.35), (0.75, 0.35), (0.75, 0.55), (0.25, 0.55)],
+            },
         }
 
     def _vehicle_hazard_observation(self) -> dict[str, object]:
@@ -128,6 +141,54 @@ class NavigationTests(unittest.TestCase):
             }
         )
         self.assertEqual(result.speech, "前方盲道上疑似有电线杆，请先停下。")
+
+    def test_blind_path_crosswalk_warns_approaching_road(self) -> None:
+        nav = NavigationStateMachine()
+        nav.command("开始导航")
+
+        result = nav.process_observation(self._blind_path_crosswalk_observation())
+
+        self.assertEqual(result.speech, "前方到马路了，请先停下。")
+        self.assertEqual(result.mode, NavigationMode.BLIND_PATH)
+
+    def test_blind_path_crosswalk_warning_bypasses_cooldown(self) -> None:
+        nav = NavigationStateMachine(clock=lambda: 10.0)
+        nav.command("开始导航")
+
+        self.assertEqual(
+            nav.process_observation({"blind_path": {"center_offset": 0.0, "angle_deg": 0}}).speech,
+            "保持直行。",
+        )
+        result = nav.process_observation(self._blind_path_crosswalk_observation())
+
+        self.assertEqual(result.speech, "前方到马路了，请先停下。")
+
+    def test_blind_path_crosswalk_warning_keeps_obstacle_priority(self) -> None:
+        nav = NavigationStateMachine()
+        nav.command("开始导航")
+        observation = self._blind_path_crosswalk_observation()
+        observation["obstacles"] = [
+            {
+                "label": "car",
+                "confidence": 0.9,
+                "box": (270, 210, 370, 430),
+                "area_ratio": 0.04,
+            }
+        ]
+
+        result = nav.process_observation(observation)
+
+        self.assertEqual(result.speech, "前方盲道上疑似有车，请先停下。")
+
+    def test_missing_blind_path_with_crosswalk_warns_approaching_road(self) -> None:
+        nav = NavigationStateMachine()
+        nav.command("开始导航")
+        observation = self._blind_path_crosswalk_observation()
+        observation.pop("blind_path")
+
+        result = nav.process_observation(observation)
+
+        self.assertEqual(result.speech, "前方到马路了，请先停下。")
 
     def test_stop_navigation(self) -> None:
         nav = NavigationStateMachine()
@@ -352,7 +413,7 @@ class NavigationTests(unittest.TestCase):
             "绿灯稳定，开始通行。",
         )
 
-    def test_green_crossing_with_vehicle_hazard_waits(self) -> None:
+    def test_crossing_ignores_obstacle_model_outputs_by_default_before_go(self) -> None:
         nav = NavigationStateMachine(clock=lambda: 10.0)
         nav.command("开始过马路")
 
@@ -373,12 +434,9 @@ class NavigationTests(unittest.TestCase):
             }
         )
 
-        self.assertEqual(
-            result.speech,
-            "绿灯，但斑马线附近疑似有车辆通过，请先等待，确认安全后再过街。",
-        )
+        self.assertEqual(result.speech, "发现斑马线，对准方向。")
 
-    def test_green_crossing_with_vehicle_hazard_bypasses_cooldown_after_go(self) -> None:
+    def test_green_crossing_ignores_obstacle_model_outputs_after_go_by_default(self) -> None:
         nav = NavigationStateMachine(clock=lambda: 10.0)
         nav.command("开始过马路")
 
@@ -404,10 +462,7 @@ class NavigationTests(unittest.TestCase):
             }
         )
 
-        self.assertEqual(
-            result.speech,
-            "绿灯，但斑马线附近疑似有车辆通过，请先等待，确认安全后再过街。",
-        )
+        self.assertIsNone(result.speech)
 
     def test_green_crossing_with_side_vehicle_can_go(self) -> None:
         nav = NavigationStateMachine(clock=lambda: 10.0)
@@ -430,10 +485,13 @@ class NavigationTests(unittest.TestCase):
 
         self.assertEqual(result.speech, "绿灯稳定，开始通行。")
 
-    def test_green_crossing_with_two_wheel_hazards_waits(self) -> None:
+    def test_green_crossing_with_two_wheel_obstacles_waits_when_enabled(self) -> None:
         for label in ("bicycle", "motorcycle", "scooter"):
             with self.subTest(label=label):
-                nav = NavigationStateMachine(clock=lambda: 10.0)
+                nav = NavigationStateMachine(
+                    clock=lambda: 10.0,
+                    tuning=VisionTuning(crossing_obstacles_enabled=True),
+                )
                 nav.command("开始过马路")
 
                 result = nav.process_observation(
@@ -601,15 +659,33 @@ class NavigationTests(unittest.TestCase):
         self.assertIsNotNone(result.state)
         self.assertEqual(result.state["crossing_lost_crosswalk_frames"], 0)
 
-    def test_crossing_vehicle_hazard_blocks_completion(self) -> None:
+    def test_crossing_obstacle_model_output_is_ignored_by_default_after_crossing_starts(
+        self,
+    ) -> None:
         nav = NavigationStateMachine(clock=lambda: 10.0)
+        self._start_active_crossing(nav)
+
+        result = nav.process_observation(self._vehicle_hazard_observation())
+
+        self.assertIsNone(result.speech)
+        self.assertEqual(result.mode, NavigationMode.CROSSING)
+        self.assertEqual(nav.mode, NavigationMode.CROSSING)
+        self.assertIsNotNone(result.state)
+        self.assertEqual(result.state["crossing_clear_path_frames"], 1)
+        self.assertEqual(result.state["crossing_completion_candidate_frames"], 0)
+
+    def test_crossing_vehicle_obstacle_blocks_completion_when_enabled(self) -> None:
+        nav = NavigationStateMachine(
+            clock=lambda: 10.0,
+            tuning=VisionTuning(crossing_obstacles_enabled=True),
+        )
         self._start_active_crossing(nav)
 
         result = nav.process_observation(self._vehicle_hazard_observation())
 
         self.assertEqual(
             result.speech,
-            "绿灯，但斑马线附近疑似有车辆通过，请先等待，确认安全后再过街。",
+            "绿灯，但斑马线附近疑似有车，请先等待，确认安全后再过街。",
         )
         self.assertEqual(result.mode, NavigationMode.CROSSING)
         self.assertEqual(nav.mode, NavigationMode.CROSSING)
@@ -621,6 +697,35 @@ class NavigationTests(unittest.TestCase):
 
         self.assertIsNone(result.speech)
         self.assertEqual(result.mode, NavigationMode.CROSSING)
+
+    def test_crossing_non_vehicle_obstacle_waits_when_enabled(self) -> None:
+        nav = NavigationStateMachine(
+            clock=lambda: 10.0,
+            tuning=VisionTuning(crossing_obstacles_enabled=True),
+        )
+        nav.command("开始过马路")
+
+        result = nav.process_observation(
+            {
+                "frame_width": 640,
+                "frame_height": 480,
+                "crosswalk": {"center_offset": 0.0},
+                "traffic_light": "go",
+                "obstacles": [
+                    {
+                        "label": "bench",
+                        "confidence": 0.9,
+                        "box": (250, 160, 390, 360),
+                        "area_ratio": 0.06,
+                    }
+                ],
+            }
+        )
+
+        self.assertEqual(
+            result.speech,
+            "绿灯，但斑马线附近疑似有长椅，请先等待，确认安全后再过街。",
+        )
 
     def test_crossing_arrival_evidence_warns_without_exiting(self) -> None:
         nav = NavigationStateMachine(clock=lambda: 10.0)
@@ -708,15 +813,18 @@ class NavigationTests(unittest.TestCase):
         self.assertEqual(result.mode, NavigationMode.CROSSING)
         self.assertEqual(nav.mode, NavigationMode.CROSSING)
 
-    def test_crossing_vehicle_hazard_without_green_uses_neutral_wait_message(self) -> None:
-        nav = NavigationStateMachine(clock=lambda: 10.0)
+    def test_crossing_obstacle_without_green_uses_neutral_wait_message(self) -> None:
+        nav = NavigationStateMachine(
+            clock=lambda: 10.0,
+            tuning=VisionTuning(crossing_obstacles_enabled=True),
+        )
         nav.command("开始过马路")
 
         observation = self._vehicle_hazard_observation()
         observation.pop("traffic_light")
         result = nav.process_observation(observation)
 
-        self.assertEqual(result.speech, "斑马线附近疑似有车辆通过，请先等待。")
+        self.assertEqual(result.speech, "斑马线附近疑似有车，请先等待。")
         self.assertEqual(result.mode, NavigationMode.CROSSING)
 
     def test_crossing_red_light_priority_over_completion(self) -> None:
@@ -734,17 +842,12 @@ class NavigationTests(unittest.TestCase):
         for _ in range(3):
             self.assertIsNone(nav.process_observation({"traffic_light": "stop"}).speech)
 
-    def test_crossing_transient_hazard_preserves_progress_evidence(self) -> None:
+    def test_crossing_transient_hazard_is_ignored_by_default_after_crossing_starts(self) -> None:
         nav = NavigationStateMachine(clock=lambda: 10.0)
         self._start_active_crossing(nav)
 
         self.assertIsNone(nav.process_observation(self._green_crossing_observation()).speech)
         result = nav.process_observation(self._vehicle_hazard_observation())
-        self.assertEqual(
-            result.speech,
-            "绿灯，但斑马线附近疑似有车辆通过，请先等待，确认安全后再过街。",
-        )
-        result = nav.process_observation(self._arrival_crosswalk_observation())
         self.assertIsNone(result.speech)
         result = nav.process_observation(self._arrival_crosswalk_observation())
         self.assertIsNone(result.speech)

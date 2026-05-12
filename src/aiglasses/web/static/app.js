@@ -74,6 +74,7 @@ const tuningFields = {
   traffic_max_area_ratio: { element: document.querySelector("#trafficMaxAreaRatio"), type: "number" },
   traffic_prefer_center_weight: { element: document.querySelector("#trafficPreferCenterWeight"), type: "number" },
   crossing_green_required_frames: { element: document.querySelector("#crossingGreenRequiredFrames"), type: "integer" },
+  crossing_obstacles_enabled: { element: document.querySelector("#crossingObstaclesEnabled"), type: "boolean" },
 };
 
 function hasOwn(object, key) {
@@ -516,6 +517,39 @@ async function saveTuning(event) {
   }
 }
 
+async function saveTuningField(key) {
+  const field = tuningFields[key];
+  if (!field?.element) return;
+  let value;
+  if (field.type === "boolean") value = field.element.checked;
+  else if (field.type === "integer") value = Number.parseInt(field.element.value, 10);
+  else value = Number.parseFloat(field.element.value);
+
+  field.element.disabled = true;
+  tuningStatusEl.textContent = "updating";
+  try {
+    const res = await fetch("/api/v1/debug/tuning", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ [key]: value }),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.detail || `HTTP ${res.status}`);
+    renderTuning(data.tuning);
+    tuningStatusEl.textContent =
+      key === "crossing_obstacles_enabled"
+        ? value
+          ? "过街障碍物提醒已开启"
+          : "过街障碍物提醒已关闭"
+        : "updated";
+  } catch (error) {
+    await loadTuning();
+    tuningStatusEl.textContent = error.message || "update failed";
+  } finally {
+    field.element.disabled = false;
+  }
+}
+
 async function loadDeviceConfig() {
   try {
     const res = await fetch("/api/v1/device/config", { cache: "no-store" });
@@ -738,6 +772,9 @@ frameEl.addEventListener("load", recordDisplayedFrame);
 frameEl.addEventListener("error", handleFrameError);
 document.querySelector("#deviceConfigForm").addEventListener("submit", saveDeviceConfig);
 document.querySelector("#tuningForm").addEventListener("submit", saveTuning);
+tuningFields.crossing_obstacles_enabled.element?.addEventListener("change", () => {
+  saveTuningField("crossing_obstacles_enabled");
+});
 allViewButton.addEventListener("click", () => {
   trafficOnlyView = false;
   allViewButton.classList.add("active");
