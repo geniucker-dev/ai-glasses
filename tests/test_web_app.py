@@ -240,6 +240,18 @@ class WebAppTests(unittest.TestCase):
         self.assertEqual(packet.payload, b"{}")
         self.assertEqual(manager.messages, [])
 
+    def test_device_connection_event_includes_generation(self) -> None:
+        from aiglasses.web.app import create_app
+
+        app = create_app(AppConfig(path=Path("config.toml"), asr=AsrConfig(enabled=False)))
+        app.state.manager.benchmark_processing_capacity = lambda: {"status": "ready"}
+
+        with TestClient(app) as client:
+            with client.websocket_connect("/ws/device/video"):
+                pass
+
+        self.assertGreaterEqual(app.state.manager.device_ws_generations["video"], 1)
+
     def test_device_speech_requires_audio_down(self) -> None:
         config = AppConfig(
             path=Path("config.toml"),

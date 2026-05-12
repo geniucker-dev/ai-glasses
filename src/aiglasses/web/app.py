@@ -263,10 +263,17 @@ def create_app(config: AppConfig) -> FastAPI:
     async def ws_device_control(ws: WebSocket) -> None:
         try:
             await ws.accept()
-            await manager.replace_device_ws("control", ws)
+            generation = await manager.replace_device_ws("control", ws)
             if not await manager.device_ws_is_current("control", ws):
                 return
-            await manager.broadcast({"kind": "device", "channel": "control", "connected": True})
+            if generation is not None:
+                await manager.broadcast(
+                    manager.device_connection_event(
+                        channel="control",
+                        connected=True,
+                        generation=generation,
+                    )
+                )
             if not await manager.sync_device_config():
                 return
             while True:
@@ -295,19 +302,31 @@ def create_app(config: AppConfig) -> FastAPI:
             logger.exception("device control websocket failed")
             await manager.broadcast({"kind": "device_error", "channel": "control", "error": str(exc)})
         finally:
-            if await manager.clear_device_ws("control", ws):
+            generation = await manager.clear_device_ws("control", ws)
+            if generation is not None:
                 await manager.broadcast(
-                    {"kind": "device", "channel": "control", "connected": False}
+                    manager.device_connection_event(
+                        channel="control",
+                        connected=False,
+                        generation=generation,
+                    )
                 )
 
     @app.websocket("/ws/device/video")
     async def ws_device_video(ws: WebSocket) -> None:
         try:
             await ws.accept()
-            await manager.replace_device_ws("video", ws)
+            generation = await manager.replace_device_ws("video", ws)
             if not await manager.device_ws_is_current("video", ws):
                 return
-            await manager.broadcast({"kind": "device", "channel": "video", "connected": True})
+            if generation is not None:
+                await manager.broadcast(
+                    manager.device_connection_event(
+                        channel="video",
+                        connected=True,
+                        generation=generation,
+                    )
+                )
             while True:
                 if not await manager.device_ws_is_current("video", ws):
                     return
@@ -334,19 +353,31 @@ def create_app(config: AppConfig) -> FastAPI:
             logger.exception("device video websocket failed")
             await manager.broadcast({"kind": "device_error", "channel": "video", "error": str(exc)})
         finally:
-            if await manager.clear_device_ws("video", ws):
+            generation = await manager.clear_device_ws("video", ws)
+            if generation is not None:
                 await manager.broadcast(
-                    {"kind": "device", "channel": "video", "connected": False}
+                    manager.device_connection_event(
+                        channel="video",
+                        connected=False,
+                        generation=generation,
+                    )
                 )
 
     @app.websocket("/ws/device/audio-up")
     async def ws_device_audio(ws: WebSocket) -> None:
         try:
             await ws.accept()
-            await manager.replace_device_ws("audio", ws)
+            generation = await manager.replace_device_ws("audio", ws)
             if not await manager.device_ws_is_current("audio", ws):
                 return
-            await manager.broadcast({"kind": "device", "channel": "audio", "connected": True})
+            if generation is not None:
+                await manager.broadcast(
+                    manager.device_connection_event(
+                        channel="audio",
+                        connected=True,
+                        generation=generation,
+                    )
+                )
             while True:
                 if not await manager.device_ws_is_current("audio", ws):
                     return
@@ -374,9 +405,14 @@ def create_app(config: AppConfig) -> FastAPI:
             logger.exception("device audio websocket failed")
             await manager.broadcast({"kind": "device_error", "channel": "audio", "error": str(exc)})
         finally:
-            if await manager.clear_device_ws("audio", ws):
+            generation = await manager.clear_device_ws("audio", ws)
+            if generation is not None:
                 await manager.broadcast(
-                    {"kind": "device", "channel": "audio", "connected": False}
+                    manager.device_connection_event(
+                        channel="audio",
+                        connected=False,
+                        generation=generation,
+                    )
                 )
 
     return app

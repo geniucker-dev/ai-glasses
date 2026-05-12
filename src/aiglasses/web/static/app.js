@@ -50,6 +50,7 @@ let lastWsFrameAt = 0;
 let trafficOnlyView = false;
 let recordingActive = false;
 let webSpeechEnabled = window.localStorage.getItem("aiglasses.webSpeechEnabled") !== "false";
+const deviceGenerations = { control: 0, video: 0, audio: 0 };
 const displayedFrameTimes = [];
 const displayFpsWindowMs = 3000;
 const maxTargetFps = 1000;
@@ -84,6 +85,18 @@ function mergeState(previous, next) {
   const merged = { ...previous, ...incoming };
   if (previous.device || incoming.device) {
     merged.device = { ...(previous.device || {}), ...(incoming.device || {}) };
+    if (previous.device?.generation || incoming.device?.generation) {
+      merged.device.generation = {
+        ...(previous.device?.generation || {}),
+        ...(incoming.device?.generation || {}),
+      };
+    }
+    if (incoming.device?.generation) {
+      Object.entries(incoming.device.generation).forEach(([channel, generation]) => {
+        const value = Number(generation);
+        if (Number.isFinite(value)) deviceGenerations[channel] = value;
+      });
+    }
   }
   if (previous.navigation || incoming.navigation) {
     merged.navigation = { ...(previous.navigation || {}), ...(incoming.navigation || {}) };
@@ -145,6 +158,21 @@ function speakInBrowser(text) {
   utterance.lang = "zh-CN";
   utterance.rate = 1.05;
   window.speechSynthesis.speak(utterance);
+}
+
+function applyDeviceConnectionEvent(msg) {
+  if (!msg.channel) return;
+  const generation = Number(msg.generation);
+  if (!Number.isFinite(generation)) return;
+  const currentGeneration = Number(deviceGenerations[msg.channel] || 0);
+  if (generation <= currentGeneration) return;
+  deviceGenerations[msg.channel] = generation;
+  renderState({
+    device: {
+      [msg.channel]: Boolean(msg.connected),
+      generation: { [msg.channel]: generation },
+    },
+  });
 }
 
 function renderStateJson() {
@@ -690,9 +718,7 @@ function connectUi() {
     if (msg.kind === "imu") renderState({ imu: msg.data });
     if (msg.kind === "device") {
       if (msg.state) renderState(msg.state);
-      if (msg.channel) {
-        renderState({ device: { [msg.channel]: Boolean(msg.connected) } });
-      }
+      applyDeviceConnectionEvent(msg);
     }
   };
   ws.onclose = () => window.setTimeout(connectUi, 900);
