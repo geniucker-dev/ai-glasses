@@ -43,6 +43,8 @@ Backend startup is expected to block until vision models are warmed up and the s
 
 ## Commit & Pull Request Guidelines
 
+Never create a git commit unless the user explicitly asks to commit using clear wording such as “提交”, “commit”, or “create a commit”. Slash-command routing context or ambiguous phrasing is not sufficient permission; when in doubt, ask before committing.
+
 Use Conventional Commits v1.0.0: `<type>[optional scope]: <description>`. Prefer lowercase types such as `feat`, `fix`, `docs`, `test`, `refactor`, `perf`, `build`, `ci`, and `chore`. Examples: `feat(vision): add model benchmark CLI`, `fix(web): preserve ASR status`, `docs: update contributor guide`. Mark breaking changes with `!` or a `BREAKING CHANGE:` footer.
 
 Pull requests should include a concise description, affected areas, verification commands run, and screenshots for visible web UI changes. Mention firmware generation steps when relevant.
