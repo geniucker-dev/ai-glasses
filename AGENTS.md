@@ -49,10 +49,6 @@ Use Conventional Commits v1.0.0: `<type>[optional scope]: <description>`. Prefer
 
 Pull requests should include a concise description, affected areas, verification commands run, and screenshots for visible web UI changes. Mention firmware generation steps when relevant.
 
-## Review Workflow
-
-When the user invokes `/review`, immediately start the `/codex:adversarial-review` command in the background with the same raw `/review` arguments (this is a slash command, not an agent), then perform the normal Claude review yourself immediately without waiting for Codex. After your own review is complete, wait for Codex to finish and merge both reviews into the final response. Treat both Claude and Codex findings as important: verify each finding against the current code before presenting it as actionable, mark invalid or uncertain findings as false positives or unconfirmed, deduplicate overlaps, call out disagreements, and keep the result focused on actionable findings.
-
 ## Security & Configuration Tips
 
 Keep `config.toml` local; it may contain WiFi credentials and API keys. Start from `config.example.toml`, regenerate firmware headers after config changes, and avoid logging secrets in backend or firmware output.
