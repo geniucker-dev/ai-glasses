@@ -14,11 +14,11 @@ YELLOW_TRAFFIC_LABELS = {"countdown_go", "countdown_stop"}
 @dataclass
 class VisionTuning:
     traffic_filter_enabled: bool = True
-    traffic_light_conf: float = 0.35
+    traffic_light_conf: float = 0.20
     traffic_signal_clear_margin: float = 0.10
-    traffic_go_min_conf: float = 0.65
-    traffic_stop_min_conf: float = 0.40
-    traffic_yellow_min_conf: float = 0.40
+    traffic_go_min_conf: float = 0.20
+    traffic_stop_min_conf: float = 0.20
+    traffic_yellow_min_conf: float = 0.90
     traffic_conflict_margin: float = 0.10
     traffic_roi_enabled: bool = False
     traffic_roi_x_min: float = 0.15
@@ -28,8 +28,12 @@ class VisionTuning:
     traffic_min_area_ratio: float = 0.00005
     traffic_max_area_ratio: float = 0.10
     traffic_prefer_center_weight: float = 0.00
+    crosswalk_conf: float = 0.65
     crossing_green_required_frames: int = 2
     crossing_obstacles_enabled: bool = False
+    road_alert_area_ratio: float = 0.002
+    road_stop_area_ratio: float = 0.015
+    road_stop_bottom_min: float = 0.55
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -84,7 +88,11 @@ class VisionTuning:
                 self.traffic_min_area_ratio,
             )
         self.traffic_prefer_center_weight = _clamp(self.traffic_prefer_center_weight, 0.0, 1.0)
+        self.crosswalk_conf = _clamp(self.crosswalk_conf, 0.0, 1.0)
         self.crossing_green_required_frames = max(1, min(10, int(self.crossing_green_required_frames)))
+        self.road_alert_area_ratio = _clamp(self.road_alert_area_ratio, 0.0, 1.0)
+        self.road_stop_area_ratio = _clamp(self.road_stop_area_ratio, 0.0, 1.0)
+        self.road_stop_bottom_min = _clamp(self.road_stop_bottom_min, 0.0, 1.0)
 
 
 def default_vision_tuning(traffic_light_conf: float) -> VisionTuning:

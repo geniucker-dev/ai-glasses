@@ -43,7 +43,7 @@ torch_half = true
 [vision.thresholds]
 blind_path_conf = 0.35
 obstacle_conf = 0.35
-traffic_light_conf = 0.35
+traffic_light_conf = 0.20
 mask_min_area = 0.01
 
 [asr]

@@ -151,6 +151,55 @@ class NavigationTests(unittest.TestCase):
         self.assertEqual(result.speech, "前方到马路了，请先停下。")
         self.assertEqual(result.mode, NavigationMode.BLIND_PATH)
 
+    def test_blind_path_distant_crosswalk_warns_without_stopping(self) -> None:
+        nav = NavigationStateMachine()
+        nav.command("开始导航")
+        observation = self._blind_path_crosswalk_observation()
+        observation["crosswalk"] = {
+            "center_offset": 0.0,
+            "area_ratio": 0.006,
+            "contour": [(0.30, 0.20), (0.70, 0.20), (0.70, 0.40), (0.30, 0.40)],
+        }
+
+        result = nav.process_observation(observation)
+
+        self.assertEqual(result.speech, "前方发现路口，请注意红绿灯。")
+        self.assertEqual(result.mode, NavigationMode.BLIND_PATH)
+
+    def test_blind_path_crosswalk_stop_does_not_downgrade_to_distant_warning(self) -> None:
+        nav = NavigationStateMachine(clock=lambda: 10.0)
+        nav.command("开始导航")
+
+        self.assertEqual(
+            nav.process_observation(self._blind_path_crosswalk_observation()).speech,
+            "前方到马路了，请先停下。",
+        )
+        observation = self._blind_path_crosswalk_observation()
+        observation["crosswalk"] = {
+            "center_offset": 0.0,
+            "area_ratio": 0.006,
+            "contour": [(0.30, 0.20), (0.70, 0.20), (0.70, 0.40), (0.30, 0.40)],
+        }
+
+        result = nav.process_observation(observation)
+
+        self.assertIsNone(result.speech)
+        self.assertEqual(result.state["last_speech"], "前方到马路了，请先停下。")
+
+    def test_blind_path_crosswalk_stop_distance_is_tunable(self) -> None:
+        nav = NavigationStateMachine(tuning=VisionTuning(road_stop_bottom_min=0.35))
+        nav.command("开始导航")
+        observation = self._blind_path_crosswalk_observation()
+        observation["crosswalk"] = {
+            "center_offset": 0.0,
+            "area_ratio": 0.020,
+            "contour": [(0.30, 0.20), (0.70, 0.20), (0.70, 0.40), (0.30, 0.40)],
+        }
+
+        result = nav.process_observation(observation)
+
+        self.assertEqual(result.speech, "前方到马路了，请先停下。")
+
     def test_blind_path_crosswalk_warning_bypasses_cooldown(self) -> None:
         nav = NavigationStateMachine(clock=lambda: 10.0)
         nav.command("开始导航")

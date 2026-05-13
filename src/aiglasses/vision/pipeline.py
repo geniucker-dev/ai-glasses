@@ -87,6 +87,12 @@ class VisionPipeline:
                 result = self.blind_model.predict(frame)
                 blind_summary = result.masks.get("blind_path")
                 crosswalk_summary = result.masks.get("road_crossing") or result.masks.get("crossing")
+                if (
+                    crosswalk_summary is not None
+                    and crosswalk_summary.confidence < self.tuning.crosswalk_conf
+                ):
+                    crosswalk_summary = None
+                    status["crosswalk_filter"] = "low_confidence"
                 status["blind_path"] = self.blind_model.status
             except Exception as exc:
                 status["blind_path"] = f"error: {exc}"

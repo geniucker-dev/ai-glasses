@@ -214,6 +214,14 @@ class WebAppTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertIs(response.json()["tuning"]["crossing_obstacles_enabled"], False)
+        self.assertEqual(response.json()["tuning"]["traffic_light_conf"], 0.2)
+        self.assertEqual(response.json()["tuning"]["traffic_go_min_conf"], 0.2)
+        self.assertEqual(response.json()["tuning"]["traffic_stop_min_conf"], 0.2)
+        self.assertEqual(response.json()["tuning"]["traffic_yellow_min_conf"], 0.9)
+        self.assertEqual(response.json()["tuning"]["crosswalk_conf"], 0.65)
+        self.assertEqual(response.json()["tuning"]["road_alert_area_ratio"], 0.002)
+        self.assertEqual(response.json()["tuning"]["road_stop_area_ratio"], 0.015)
+        self.assertEqual(response.json()["tuning"]["road_stop_bottom_min"], 0.55)
 
     def test_tuning_update_accepts_crossing_obstacles_enabled(self) -> None:
         from aiglasses.web.app import create_app
@@ -230,6 +238,28 @@ class WebAppTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertIs(response.json()["tuning"]["crossing_obstacles_enabled"], True)
         self.assertIs(app.state.manager.vision.tuning.crossing_obstacles_enabled, True)
+        self.assertIs(app.state.manager.navigation.tuning, app.state.manager.vision.tuning)
+
+    def test_tuning_update_accepts_road_alert_thresholds(self) -> None:
+        from aiglasses.web.app import create_app
+
+        app = create_app(AppConfig(path=Path("config.toml"), asr=AsrConfig(enabled=False)))
+        app.state.manager.benchmark_processing_capacity = lambda: {"status": "ready"}
+
+        with TestClient(app) as client:
+            response = client.post(
+                "/api/v1/debug/tuning",
+                json={
+                    "road_alert_area_ratio": 0.004,
+                    "road_stop_area_ratio": 0.020,
+                    "road_stop_bottom_min": 0.60,
+                },
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["tuning"]["road_alert_area_ratio"], 0.004)
+        self.assertEqual(response.json()["tuning"]["road_stop_area_ratio"], 0.020)
+        self.assertEqual(response.json()["tuning"]["road_stop_bottom_min"], 0.60)
         self.assertIs(app.state.manager.navigation.tuning, app.state.manager.vision.tuning)
 
     def test_recording_endpoints_delegate_to_manager(self) -> None:

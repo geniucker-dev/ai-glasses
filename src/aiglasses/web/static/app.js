@@ -73,8 +73,12 @@ const tuningFields = {
   traffic_min_area_ratio: { element: document.querySelector("#trafficMinAreaRatio"), type: "number" },
   traffic_max_area_ratio: { element: document.querySelector("#trafficMaxAreaRatio"), type: "number" },
   traffic_prefer_center_weight: { element: document.querySelector("#trafficPreferCenterWeight"), type: "number" },
+  crosswalk_conf: { element: document.querySelector("#crosswalkConf"), type: "number" },
   crossing_green_required_frames: { element: document.querySelector("#crossingGreenRequiredFrames"), type: "integer" },
   crossing_obstacles_enabled: { element: document.querySelector("#crossingObstaclesEnabled"), type: "boolean" },
+  road_alert_area_ratio: { element: document.querySelector("#roadAlertAreaRatio"), type: "number" },
+  road_stop_area_ratio: { element: document.querySelector("#roadStopAreaRatio"), type: "number" },
+  road_stop_bottom_min: { element: document.querySelector("#roadStopBottomMin"), type: "number" },
 };
 
 function hasOwn(object, key) {
@@ -329,11 +333,15 @@ function drawOverlay() {
     const y = rect.height * summary.vertical_position;
     ctx.fillStyle = color;
     ctx.font = "700 13px Avenir Next, sans-serif";
-    ctx.fillText(label, x + 10, Math.max(16, y - 10));
+    const confidence = Number(summary.confidence);
+    const text = Number.isFinite(confidence) && confidence > 0
+      ? `${label} ${Math.round(confidence * 100)}%`
+      : label;
+    ctx.fillText(text, x + 10, Math.max(16, y - 10));
   }
 
-  colorOverlay(blind, "#2f9c67", "blind path");
-  colorOverlay(crosswalk, "#e4572e", "crosswalk");
+  colorOverlay(blind, "#2f9c67", blind?.label || "blind path");
+  colorOverlay(crosswalk, "#e4572e", crosswalk?.label || "crosswalk");
 
   const trafficCandidates = latestObservation.traffic_light_candidates || [];
   if (trafficOnlyView) {

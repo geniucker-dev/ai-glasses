@@ -45,7 +45,12 @@ def _nms(boxes: np.ndarray, scores: np.ndarray, iou_threshold: float = 0.45) -> 
     return keep
 
 
-def _summarize_mask(label: str, mask: np.ndarray, min_area: float) -> MaskSummary | None:
+def _summarize_mask(
+    label: str,
+    mask: np.ndarray,
+    min_area: float,
+    confidence: float,
+) -> MaskSummary | None:
     h, w = mask.shape[:2]
     ys, xs = np.where(mask > 0)
     if xs.size == 0:
@@ -75,7 +80,15 @@ def _summarize_mask(label: str, mask: np.ndarray, min_area: float) -> MaskSummar
             (float(x) / max(w - 1, 1), float(y) / max(h - 1, 1)) for x, y in pts
         ]
 
-    return MaskSummary(label, area_ratio, center_offset, vertical_position, angle_deg, contour_points)
+    return MaskSummary(
+        label,
+        area_ratio,
+        center_offset,
+        vertical_position,
+        angle_deg,
+        float(confidence),
+        contour_points,
+    )
 
 
 def postprocess_yolo_outputs(
@@ -155,7 +168,12 @@ def postprocess_yolo_outputs(
                     mask = np.tensordot(coeffs[i], proto, axes=(0, 0))
                     mask = 1.0 / (1.0 + np.exp(-mask))
                     mask = cv2.resize(mask, (width, height))
-                    summary = _summarize_mask(label, (mask > 0.5).astype(np.uint8), min_mask_area)
+                    summary = _summarize_mask(
+                        label,
+                        (mask > 0.5).astype(np.uint8),
+                        min_mask_area,
+                        float(scores[i]),
+                    )
                     if summary and (
                         label not in masks or summary.area_ratio > masks[label].area_ratio
                     ):

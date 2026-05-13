@@ -97,6 +97,7 @@ class NavigationStateMachine:
         self._crossing_completion_candidate_frames = 0
         self._crossing_saw_near_crosswalk = False
         self._crossing_started_at: float | None = None
+        self._blind_path_road_stop_latched = False
 
     def command(self, text: str) -> NavigationResult:
         normalized = text.strip()
@@ -119,8 +120,6 @@ class NavigationStateMachine:
             speech = "盲道导航已启动。"
         elif any(k in normalized for k in ("停止导航", "结束导航", "取消导航")):
             speech = self._stop_current_mode()
-        elif any(k in normalized for k in ("继续", "立即通过", "现在通过")):
-            speech = "收到。"
         return NavigationResult(self.mode, speech=speech, state=self.snapshot())
 
     def process_observation(self, observation: dict[str, Any]) -> NavigationResult:
@@ -188,6 +187,7 @@ class NavigationStateMachine:
         self._candidate_frames = 0
         self._last_guidance_spoken_at = None
         self._reset_crossing_progress()
+        self._blind_path_road_stop_latched = False
 
     def _reset_crossing_progress(self) -> None:
         self._crossing_green_frames = 0
@@ -238,6 +238,7 @@ class NavigationStateMachine:
                 "红灯。",
                 "绿灯。",
                 "黄灯。",
+                "前方发现路口，请注意红绿灯。",
                 "前方到马路了，请先停下。",
                 "绿灯稳定，开始通行。",
                 "疑似已通过人行横道，请确认安全后停止过马路模式。",
@@ -247,20 +248,34 @@ class NavigationStateMachine:
 
     def _blind_path_guidance(self, obs: dict[str, Any]) -> str | None:
         blind = obs.get("blind_path")
-        crosswalk_ahead = self._is_blind_path_crosswalk_ahead(obs.get("crosswalk"))
+        crosswalk = obs.get("crosswalk")
+        crosswalk_visible = self._is_blind_path_crosswalk_visible(crosswalk)
+        crosswalk_near_stop = self._is_blind_path_crosswalk_near_stop(crosswalk)
+        if not crosswalk_visible:
+            self._blind_path_road_stop_latched = False
         if not blind:
             obstacle = self._find_centered_near_obstacle(obs)
             if obstacle:
                 label = self._obstacle_speech_label(obstacle)
                 return f"前方疑似有{label}，请先停下。"
-            if crosswalk_ahead:
+            if crosswalk_near_stop:
+                self._blind_path_road_stop_latched = True
                 return "前方到马路了，请先停下。"
+            if self._blind_path_road_stop_latched and crosswalk_visible:
+                return "前方到马路了，请先停下。"
+            if crosswalk_visible:
+                return "前方发现路口，请注意红绿灯。"
             return "没看到盲道，请原地小幅转动。"
         obstacle = self._find_blind_path_obstacle(obs)
         if obstacle:
             return f"前方盲道上疑似有{self._obstacle_speech_label(obstacle)}，请先停下。"
-        if crosswalk_ahead:
+        if crosswalk_near_stop:
+            self._blind_path_road_stop_latched = True
             return "前方到马路了，请先停下。"
+        if self._blind_path_road_stop_latched and crosswalk_visible:
+            return "前方到马路了，请先停下。"
+        if crosswalk_visible:
+            return "前方发现路口，请注意红绿灯。"
         offset = float(blind.get("center_offset", 0.0))
         angle = float(blind.get("angle_deg", 0.0))
         if offset < -0.18:
@@ -273,11 +288,20 @@ class NavigationStateMachine:
             return "请向右转动。"
         return "保持直行。"
 
-    def _is_blind_path_crosswalk_ahead(self, crosswalk: Any) -> bool:
+    def _is_blind_path_crosswalk_visible(self, crosswalk: Any) -> bool:
         if not isinstance(crosswalk, dict):
             return False
         area_ratio = self._mask_area_ratio(crosswalk)
-        return area_ratio is None or area_ratio >= CROSSING_MIN_AREA_RATIO
+        return area_ratio is None or area_ratio >= self.tuning.road_alert_area_ratio
+
+    def _is_blind_path_crosswalk_near_stop(self, crosswalk: Any) -> bool:
+        if not isinstance(crosswalk, dict):
+            return False
+        area_ratio = self._mask_area_ratio(crosswalk)
+        if area_ratio is None or area_ratio < self.tuning.road_stop_area_ratio:
+            return False
+        bottom = self._mask_bottom(crosswalk)
+        return bottom is not None and bottom >= self.tuning.road_stop_bottom_min
 
     @staticmethod
     def _obstacle_speech_label(obstacle: dict[str, Any]) -> str:

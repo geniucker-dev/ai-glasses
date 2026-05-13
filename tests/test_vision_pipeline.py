@@ -8,8 +8,17 @@ import numpy as np
 from aiglasses.config import AppConfig
 from aiglasses.vision.pipeline import VisionPipeline
 from aiglasses.vision.tuning import VisionTuning, select_traffic_signal
-from aiglasses.vision.types import Detection
+from aiglasses.vision.types import Detection, MaskSummary
 from aiglasses.vision.yolo_postprocess import YoloOutput
+
+
+@dataclass
+class FakeBlindModel:
+    masks: dict[str, MaskSummary]
+    status: str = "ready"
+
+    def predict(self, frame: np.ndarray) -> YoloOutput:
+        return YoloOutput(detections=[], masks=self.masks)
 
 
 @dataclass
@@ -94,6 +103,61 @@ class VisionPipelineTrafficLightTests(unittest.TestCase):
 
         self.assertIsNotNone(selected)
         self.assertEqual(selected.box, center.box)
+
+    def test_crosswalk_segmentation_confidence_filters_false_positive_mask(self) -> None:
+        pipeline = object.__new__(VisionPipeline)
+        pipeline.config = AppConfig(path="config.toml")
+        pipeline.model_status = {}
+        pipeline.blind_model = FakeBlindModel(
+            {
+                "blind_path": MaskSummary(
+                    "blind_path",
+                    area_ratio=0.08,
+                    center_offset=0.0,
+                    vertical_position=0.70,
+                    confidence=0.92,
+                ),
+                "crossing": MaskSummary(
+                    "crossing",
+                    area_ratio=0.06,
+                    center_offset=0.0,
+                    vertical_position=0.60,
+                    confidence=0.40,
+                ),
+            }
+        )
+        pipeline.obstacle_model = None
+        pipeline.traffic_model = None
+        pipeline.tuning = VisionTuning(crosswalk_conf=0.65)
+
+        analysis = pipeline.analyze_frame(np.zeros((8, 8, 3), dtype=np.uint8))
+
+        self.assertIsNotNone(analysis.blind_path)
+        self.assertIsNone(analysis.crosswalk)
+
+    def test_crosswalk_segmentation_confidence_keeps_strong_mask(self) -> None:
+        pipeline = object.__new__(VisionPipeline)
+        pipeline.config = AppConfig(path="config.toml")
+        pipeline.model_status = {}
+        pipeline.blind_model = FakeBlindModel(
+            {
+                "crossing": MaskSummary(
+                    "crossing",
+                    area_ratio=0.06,
+                    center_offset=0.0,
+                    vertical_position=0.60,
+                    confidence=0.86,
+                )
+            }
+        )
+        pipeline.obstacle_model = None
+        pipeline.traffic_model = None
+        pipeline.tuning = VisionTuning(crosswalk_conf=0.65)
+
+        analysis = pipeline.analyze_frame(np.zeros((8, 8, 3), dtype=np.uint8))
+
+        self.assertIsNotNone(analysis.crosswalk)
+        self.assertEqual(analysis.crosswalk.confidence, 0.86)
 
 
 if __name__ == "__main__":

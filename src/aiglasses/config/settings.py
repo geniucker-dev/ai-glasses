@@ -84,7 +84,7 @@ class ModelsConfig:
 class VisionThresholds:
     blind_path_conf: float = 0.35
     obstacle_conf: float = 0.35
-    traffic_light_conf: float = 0.35
+    traffic_light_conf: float = 0.20
     mask_min_area: float = 0.01
 
 

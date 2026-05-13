@@ -22,6 +22,7 @@ class MaskSummary:
     center_offset: float
     vertical_position: float
     angle_deg: float = 0.0
+    confidence: float = 0.0
     contour: list[tuple[float, float]] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
