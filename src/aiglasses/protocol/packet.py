@@ -19,6 +19,7 @@ class PacketType(IntEnum):
     SPEECH_PCM16 = 6
     PING = 7
     PONG = 8
+    VIDEO_JPEG_FRAGMENT = 9
 
 
 MAGIC = b"AGL1"

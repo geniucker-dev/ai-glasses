@@ -5,6 +5,8 @@ import base64
 from contextlib import asynccontextmanager
 import logging
 from pathlib import Path
+import struct
+import time
 from typing import Annotated, Any
 
 from fastapi import Body, FastAPI, HTTPException, WebSocket, WebSocketDisconnect
@@ -15,7 +17,7 @@ from aiglasses.asr import AsrService
 from aiglasses.config import AppConfig
 from aiglasses.device import DeviceManager, clamp_target_video_fps
 from aiglasses.navigation import NavigationStateMachine
-from aiglasses.protocol import MAX_PAYLOAD_BYTES, Packet, ProtocolError
+from aiglasses.protocol import MAX_PAYLOAD_BYTES, Packet, PacketType, ProtocolError
 from aiglasses.speech import DashscopeTtsSpeechSink, LocalTtsSpeechSink, SpeechHub, UiSpeechSink
 from aiglasses.vision import VisionPipeline
 
@@ -25,6 +27,7 @@ logger = logging.getLogger("aiglasses.web")
 CONTROL_MAX_PAYLOAD_BYTES = 8 * 1024
 AUDIO_MAX_PAYLOAD_BYTES = 64 * 1024
 VIDEO_MAX_PAYLOAD_BYTES = MAX_PAYLOAD_BYTES
+VIDEO_FRAGMENT_HEADER = struct.Struct("<IQIIHH")
 
 
 def _is_websocket_state_error(exc: RuntimeError) -> bool:
@@ -67,6 +70,137 @@ async def _receive_current_device_packet(
     if packet is None or not await manager.device_ws_is_current(channel, ws):
         return None
     return packet
+
+
+class UdpVideoReassembler:
+    def __init__(self, manager: DeviceManager, config: AppConfig):
+        self.manager = manager
+        self.config = config
+        self.frames: dict[int, dict[str, Any]] = {}
+        self.active_session_id: int | None = None
+        self.retired_session_ids: set[int] = set()
+        self.last_completed_frame_id = -1
+        self.lock = asyncio.Lock()
+
+    async def handle_datagram(self, data: bytes, addr: tuple[str, int]) -> None:
+        max_fragment_payload = (
+            VIDEO_FRAGMENT_HEADER.size + self.config.device.transport.video_payload_bytes
+        )
+        try:
+            packet = Packet.unpack(data, max_payload_bytes=max_fragment_payload)
+            if packet.packet_type != PacketType.VIDEO_JPEG_FRAGMENT:
+                raise ProtocolError(f"unexpected udp video packet: {packet.packet_type}")
+            if len(packet.payload) < VIDEO_FRAGMENT_HEADER.size:
+                raise ProtocolError("video fragment payload too short")
+            (
+                session_id,
+                frame_id,
+                frame_len,
+                offset,
+                chunk_index,
+                chunk_count,
+            ) = VIDEO_FRAGMENT_HEADER.unpack(packet.payload[: VIDEO_FRAGMENT_HEADER.size])
+            chunk = packet.payload[VIDEO_FRAGMENT_HEADER.size :]
+            chunk_bytes = self.config.device.transport.video_payload_bytes
+            expected_chunk_count = (frame_len + chunk_bytes - 1) // chunk_bytes
+            expected_offset = chunk_index * chunk_bytes
+            expected_chunk_len = (
+                chunk_bytes if chunk_index + 1 < chunk_count else frame_len - expected_offset
+            )
+            if frame_len == 0 or frame_len > VIDEO_MAX_PAYLOAD_BYTES:
+                raise ProtocolError(f"video frame too large: {frame_len}")
+            if chunk_count == 0 or chunk_index >= chunk_count:
+                raise ProtocolError("invalid video fragment index")
+            if chunk_count != expected_chunk_count:
+                raise ProtocolError("invalid video fragment count")
+            if offset != expected_offset:
+                raise ProtocolError("misaligned video fragment offset")
+            if len(chunk) != expected_chunk_len:
+                raise ProtocolError("invalid video fragment length")
+            if offset + len(chunk) > frame_len:
+                raise ProtocolError("video fragment exceeds frame length")
+        except ProtocolError as exc:
+            logger.warning("dropping bad udp video packet from %s: %s", addr, exc)
+            await self.manager.broadcast(
+                {"kind": "device_error", "channel": "video_udp", "error": str(exc)}
+            )
+            return
+
+        complete_payload: bytes | None = None
+        now = time.monotonic()
+        async with self.lock:
+            if self.active_session_id is None:
+                self.active_session_id = session_id
+            elif session_id != self.active_session_id:
+                if session_id in self.retired_session_ids:
+                    return
+                self.retired_session_ids.add(self.active_session_id)
+                self.active_session_id = session_id
+                self.last_completed_frame_id = -1
+                self.frames.clear()
+            self._drop_expired(now)
+            frame = self.frames.get(frame_id)
+            if frame is None:
+                frame = {
+                    "created_at": now,
+                    "frame_len": frame_len,
+                    "chunk_count": chunk_count,
+                    "buffer": bytearray(frame_len),
+                    "seen": set(),
+                    "received": 0,
+                    "timestamp_ms": packet.timestamp_ms,
+                }
+                self.frames[frame_id] = frame
+            if frame["frame_len"] != frame_len or frame["chunk_count"] != chunk_count:
+                self.frames.pop(frame_id, None)
+                logger.warning("dropping inconsistent udp video frame id=%s from %s", frame_id, addr)
+                return
+            seen: set[int] = frame["seen"]
+            if chunk_index not in seen:
+                buffer: bytearray = frame["buffer"]
+                buffer[offset : offset + len(chunk)] = chunk
+                seen.add(chunk_index)
+                frame["received"] += len(chunk)
+            if len(seen) == chunk_count and frame["received"] >= frame_len:
+                self.frames.pop(frame_id, None)
+                if frame_id > self.last_completed_frame_id:
+                    complete_payload = bytes(frame["buffer"])
+                    self.last_completed_frame_id = frame_id
+
+        if complete_payload is not None:
+            self.manager.mark_video_udp_seen()
+            await self.manager.handle_video_packet(
+                Packet(PacketType.VIDEO_JPEG, frame_id, packet.timestamp_ms, complete_payload)
+            )
+
+    def _drop_expired(self, now: float) -> None:
+        timeout_ms = max(
+            self.config.device.transport.video_frame_timeout_ms,
+            self.config.device.transport.video_reorder_window_ms,
+        )
+        timeout_s = timeout_ms / 1000
+        expired = [
+            frame_id
+            for frame_id, frame in self.frames.items()
+            if now - frame["created_at"] > timeout_s
+        ]
+        for frame_id in expired:
+            self.frames.pop(frame_id, None)
+
+
+class UdpVideoProtocol(asyncio.DatagramProtocol):
+    def __init__(self, reassembler: UdpVideoReassembler):
+        self.reassembler = reassembler
+
+    def connection_made(self, transport: asyncio.BaseTransport) -> None:
+        sockname = transport.get_extra_info("sockname")
+        logger.info("device udp video listening on %s", sockname)
+
+    def datagram_received(self, data: bytes, addr: tuple[str, int]) -> None:
+        asyncio.create_task(self.reassembler.handle_datagram(data, addr))
+
+    def error_received(self, exc: Exception) -> None:
+        logger.warning("device udp video error: %s", exc)
 
 
 def validate_speech_config(config: AppConfig) -> None:
@@ -117,6 +251,7 @@ def create_app(config: AppConfig) -> FastAPI:
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI):
+        udp_video_transport: asyncio.DatagramTransport | None = None
         try:
             benchmark = await asyncio.to_thread(manager.benchmark_processing_capacity)
             logger.info("backend processing benchmark: %s", benchmark)
@@ -127,9 +262,17 @@ def create_app(config: AppConfig) -> FastAPI:
                 "error": str(exc),
             }
         await asr.start()
+        if config.device.transport.video == "udp":
+            loop = asyncio.get_running_loop()
+            udp_video_transport, _ = await loop.create_datagram_endpoint(
+                lambda: UdpVideoProtocol(UdpVideoReassembler(manager, config)),
+                local_addr=(config.server.host, config.server.port),
+            )
         try:
             yield
         finally:
+            if udp_video_transport is not None:
+                udp_video_transport.close()
             await manager.stop_recording()
             await asr.stop()
 

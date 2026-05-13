@@ -95,6 +95,7 @@ def render_header(config_path: str | Path) -> str:
     server_host, server_port = _server_endpoint(config.server.public_base_url)
     device = config.device
     capture = device.capture
+    transport = device.transport
 
     return f"""#pragma once
 
@@ -112,6 +113,8 @@ def render_header(config_path: str | Path) -> str:
 #define AGL_AUDIO_CHUNK_MS {int(capture.audio_chunk_ms)}
 #define AGL_IMU_HZ {int(capture.imu_hz)}
 #define AGL_AUDIO_DOWN_ENABLED {1 if device.audio_down.enabled else 0}
+#define AGL_VIDEO_TRANSPORT_UDP {1 if transport.video == "udp" else 0}
+#define AGL_VIDEO_UDP_CHUNK_BYTES {int(transport.video_payload_bytes)}
 """
 
 

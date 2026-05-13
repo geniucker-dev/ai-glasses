@@ -11,13 +11,22 @@ ssid = "your-wifi-ssid"
 password = "your-wifi-password"
 
 [device.capture]
-video_fps = 6
-jpeg_quality = 12
-frame_size = "VGA"
+video_fps = 4
+jpeg_quality = 10
+frame_size = "SVGA"
 camera_profile = "traffic_signal"
 audio_sample_rate = 16000
 audio_chunk_ms = 100
 imu_hz = 50
+
+[device.transport]
+video = "udp"
+video_payload_bytes = 1200
+video_reorder_window_ms = 120
+video_frame_timeout_ms = 180
+control = "ws"
+audio_up = "ws"
+audio_down = "ws"
 
 [device.audio_down]
 enabled = false

@@ -71,6 +71,7 @@ class DeviceManager:
     control_ws: WebSocket | None = None
     video_ws: WebSocket | None = None
     audio_ws: WebSocket | None = None
+    video_udp_last_seen_at: float | None = None
     last_frame_jpeg: bytes | None = None
     last_analysis: FrameAnalysis | None = None
     last_imu: dict[str, Any] | None = None
@@ -295,6 +296,17 @@ class DeviceManager:
             "sharpness": self.device_sharpness,
             "gainceiling": self.device_gainceiling,
         }
+
+    def mark_video_udp_seen(self) -> None:
+        self.video_udp_last_seen_at = time.monotonic()
+
+    def video_transport_connected(self) -> bool:
+        if self.video_ws is not None:
+            return True
+        return (
+            self.video_udp_last_seen_at is not None
+            and time.monotonic() - self.video_udp_last_seen_at <= 5
+        )
 
     async def send_device_config(self) -> bool:
         ws = self.control_ws
@@ -670,7 +682,7 @@ class DeviceManager:
             "uptime_s": round(time.time() - self.started_at, 1),
             "device": {
                 "control": self.control_ws is not None,
-                "video": self.video_ws is not None,
+                "video": self.video_transport_connected(),
                 "audio": self.audio_ws is not None,
                 "generation": dict(self.device_ws_generations),
             },

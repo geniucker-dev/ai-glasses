@@ -1,6 +1,7 @@
 #include <Arduino.h>
 #include <ArduinoWebsockets.h>
 #include <WiFi.h>
+#include <WiFiUdp.h>
 #include <ctype.h>
 #include <esp_camera.h>
 #include <esp_heap_caps.h>
@@ -34,19 +35,28 @@ static constexpr int MAX_TARGET_VIDEO_FPS = 1000;
 #ifndef AGL_VIDEO_PACKET_CAPACITY
 #define AGL_VIDEO_PACKET_CAPACITY (240 * 1024)
 #endif
+#ifndef AGL_VIDEO_TRANSPORT_UDP
+#define AGL_VIDEO_TRANSPORT_UDP 0
+#endif
+#ifndef AGL_VIDEO_UDP_CHUNK_BYTES
+#define AGL_VIDEO_UDP_CHUNK_BYTES 1200
+#endif
 
 static constexpr int AUDIO_BYTES_PER_CHUNK = AGL_AUDIO_SAMPLE_RATE * AGL_AUDIO_CHUNK_MS / 1000 * 2;
 static constexpr size_t PACKET_HEADER_SIZE = sizeof(PacketHeader);
 static constexpr size_t CONTROL_PACKET_CAPACITY = 1024;
 static constexpr size_t VIDEO_PACKET_CAPACITY = AGL_VIDEO_PACKET_CAPACITY;
+static constexpr size_t VIDEO_FRAGMENT_HEADER_SIZE = 24;
 static constexpr size_t SPEECH_SAMPLES_PER_WRITE = 256;
 static constexpr size_t SPEECH_PCM16_MAX_PAYLOAD = 64 * 1024;
 
 WebsocketsClient wsControl;
 WebsocketsClient wsVideo;
 WebsocketsClient wsAudio;
+WiFiUDP udpVideo;
 I2SClass i2sIn;
 I2SClass i2sOut;
+IPAddress udpVideoRemoteIp;
 
 volatile bool wifiReady = false;
 volatile bool controlReady = false;
@@ -64,6 +74,8 @@ volatile bool runtimeTrafficSignalProfile = AGL_CAMERA_PROFILE == AGL_CAMERA_PRO
 uint64_t seqControl = 0;
 uint64_t seqVideo = 0;
 uint64_t seqAudio = 0;
+uint64_t frameVideo = 0;
+uint32_t videoSessionId = 0;
 
 static uint8_t audioPacket[PACKET_HEADER_SIZE + AUDIO_BYTES_PER_CHUNK];
 static uint8_t audioRaw[AUDIO_BYTES_PER_CHUNK];
@@ -101,6 +113,89 @@ bool send_packet(WebsocketsClient& ws, SemaphoreHandle_t mutex, PacketType type,
   }
   xSemaphoreGive(mutex);
   return sent;
+}
+
+void write_u16_le(uint8_t* out, uint16_t value) {
+  out[0] = (uint8_t)(value & 0xFF);
+  out[1] = (uint8_t)((value >> 8) & 0xFF);
+}
+
+void write_u32_le(uint8_t* out, uint32_t value) {
+  for (int i = 0; i < 4; ++i) out[i] = (uint8_t)((value >> (8 * i)) & 0xFF);
+}
+
+void write_u64_le(uint8_t* out, uint64_t value) {
+  for (int i = 0; i < 8; ++i) out[i] = (uint8_t)((value >> (8 * i)) & 0xFF);
+}
+
+bool setup_udp_video() {
+  if (!AGL_VIDEO_TRANSPORT_UDP) return true;
+  if (WiFi.hostByName(AGL_SERVER_HOST, udpVideoRemoteIp) != 1) {
+    Serial.println("[UDP video] DNS failed");
+    return false;
+  }
+  if (udpVideo.begin(0) != 1) {
+    Serial.println("[UDP video] begin failed");
+    return false;
+  }
+  videoReady = true;
+  Serial.printf("[UDP video] ready remote=%s:%u chunk=%u\n",
+                udpVideoRemoteIp.toString().c_str(),
+                (unsigned)AGL_SERVER_PORT,
+                (unsigned)AGL_VIDEO_UDP_CHUNK_BYTES);
+  return true;
+}
+
+bool send_udp_video_frame(const uint8_t* jpeg, uint32_t len) {
+  if (!videoReady || !videoPacket || AGL_VIDEO_UDP_CHUNK_BYTES == 0) return false;
+  uint32_t chunkBytes = min((uint32_t)AGL_VIDEO_UDP_CHUNK_BYTES, (uint32_t)1400);
+  uint32_t chunkCount = (len + chunkBytes - 1) / chunkBytes;
+  if (chunkCount == 0 || chunkCount > 65535) return false;
+  uint64_t frameId = frameVideo++;
+  bool ok = true;
+
+  if (xSemaphoreTake(videoMutex, pdMS_TO_TICKS(250)) != pdTRUE) return false;
+  for (uint32_t chunkIndex = 0; chunkIndex < chunkCount; ++chunkIndex) {
+    uint32_t offset = chunkIndex * chunkBytes;
+    uint32_t partLen = min(chunkBytes, len - offset);
+    uint8_t fragmentHeader[VIDEO_FRAGMENT_HEADER_SIZE];
+    write_u32_le(fragmentHeader, videoSessionId);
+    write_u64_le(fragmentHeader + 4, frameId);
+    write_u32_le(fragmentHeader + 12, len);
+    write_u32_le(fragmentHeader + 16, offset);
+    write_u16_le(fragmentHeader + 20, (uint16_t)chunkIndex);
+    write_u16_le(fragmentHeader + 22, (uint16_t)chunkCount);
+
+    uint32_t payloadLen = VIDEO_FRAGMENT_HEADER_SIZE + partLen;
+    if (PACKET_HEADER_SIZE + payloadLen > VIDEO_PACKET_CAPACITY) {
+      ok = false;
+      break;
+    }
+    memcpy(videoPacket + PACKET_HEADER_SIZE, fragmentHeader, VIDEO_FRAGMENT_HEADER_SIZE);
+    memcpy(videoPacket + PACKET_HEADER_SIZE + VIDEO_FRAGMENT_HEADER_SIZE, jpeg + offset, partLen);
+    write_packet_header(
+        videoPacket,
+        PKT_VIDEO_JPEG_FRAGMENT,
+        seqVideo++,
+        videoPacket + PACKET_HEADER_SIZE,
+        payloadLen);
+    if (!udpVideo.beginPacket(udpVideoRemoteIp, AGL_SERVER_PORT) ||
+        udpVideo.write(videoPacket, PACKET_HEADER_SIZE + payloadLen) != PACKET_HEADER_SIZE + payloadLen ||
+        udpVideo.endPacket() != 1) {
+      ok = false;
+      break;
+    }
+  }
+  xSemaphoreGive(videoMutex);
+  if (!ok) Serial.println("[UDP video] frame send failed");
+  return ok;
+}
+
+bool send_video_frame(const uint8_t* jpeg, uint32_t len) {
+  if (AGL_VIDEO_TRANSPORT_UDP) {
+    return send_udp_video_frame(jpeg, len);
+  }
+  return send_packet(wsVideo, videoMutex, PKT_VIDEO_JPEG, seqVideo, jpeg, len);
 }
 
 void apply_camera_profile(sensor_t* s) {
@@ -406,7 +501,7 @@ void task_camera(void*) {
     }
     lastFrame = now;
     if (fb->format == PIXFORMAT_JPEG) {
-      send_packet(wsVideo, videoMutex, PKT_VIDEO_JPEG, seqVideo, fb->buf, fb->len);
+      send_video_frame(fb->buf, fb->len);
     }
     esp_camera_fb_return(fb);
   }
@@ -565,6 +660,7 @@ void setup() {
     delay(1500);
     esp_restart();
   }
+  videoSessionId = esp_random();
   connect_wifi();
   if (!init_camera()) {
     delay(1500);
@@ -572,6 +668,7 @@ void setup() {
   }
   init_audio();
   setup_ws_handlers();
+  setup_udp_video();
   xTaskCreatePinnedToCore(task_camera, "camera", 8192, nullptr, 3, nullptr, 1);
   xTaskCreatePinnedToCore(task_audio, "audio", 4096, nullptr, 2, nullptr, 0);
   xTaskCreatePinnedToCore(task_imu, "imu", 4096, nullptr, 1, nullptr, 0);
@@ -585,7 +682,10 @@ void loop() {
       if (!controlReady) wsControl.connect(AGL_SERVER_HOST, AGL_SERVER_PORT, "/ws/device/control");
       xSemaphoreGive(controlMutex);
     }
-    if (xSemaphoreTake(videoMutex, pdMS_TO_TICKS(250)) == pdTRUE) {
+    if (AGL_VIDEO_TRANSPORT_UDP && !videoReady) {
+      setup_udp_video();
+    }
+    if (!AGL_VIDEO_TRANSPORT_UDP && xSemaphoreTake(videoMutex, pdMS_TO_TICKS(250)) == pdTRUE) {
       if (!videoReady) wsVideo.connect(AGL_SERVER_HOST, AGL_SERVER_PORT, "/ws/device/video");
       xSemaphoreGive(videoMutex);
     }
@@ -599,7 +699,7 @@ void loop() {
     wsControl.poll();
     xSemaphoreGive(controlMutex);
   }
-  if (videoReady && xSemaphoreTake(videoMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
+  if (!AGL_VIDEO_TRANSPORT_UDP && videoReady && xSemaphoreTake(videoMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
     wsVideo.poll();
     xSemaphoreGive(videoMutex);
   }

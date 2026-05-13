@@ -65,9 +65,11 @@ class ConfigTests(unittest.TestCase):
     def test_firmware_header_includes_frame_size(self) -> None:
         header = render_header("config.example.toml")
 
-        self.assertIn("#define AGL_FRAME_SIZE FRAMESIZE_VGA", header)
-        self.assertIn("#define AGL_VIDEO_PACKET_CAPACITY 245760", header)
+        self.assertIn("#define AGL_FRAME_SIZE FRAMESIZE_SVGA", header)
+        self.assertIn("#define AGL_VIDEO_PACKET_CAPACITY 393216", header)
         self.assertIn("#define AGL_CAMERA_PROFILE AGL_CAMERA_PROFILE_TRAFFIC_SIGNAL", header)
+        self.assertIn("#define AGL_VIDEO_TRANSPORT_UDP 1", header)
+        self.assertIn("#define AGL_VIDEO_UDP_CHUNK_BYTES 1200", header)
 
     def test_firmware_header_maps_configured_frame_size(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -77,6 +79,15 @@ class ConfigTests(unittest.TestCase):
             header = render_header(config_path)
 
         self.assertIn("#define AGL_FRAME_SIZE FRAMESIZE_QVGA", header)
+
+    def test_firmware_header_disables_udp_video_macro_for_ws_transport(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = Path(tmp) / "config.toml"
+            config_path.write_text('[device.transport]\nvideo = "ws"\n', encoding="utf-8")
+
+            header = render_header(config_path)
+
+        self.assertIn("#define AGL_VIDEO_TRANSPORT_UDP 0", header)
 
     def test_firmware_header_caps_large_video_packet_capacity_to_backend_limit(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -161,6 +172,28 @@ class ConfigTests(unittest.TestCase):
                     )
 
                     with self.assertRaisesRegex(ValueError, rf"device\.capture\.{field}"):
+                        load_config(config_path)
+
+    def test_invalid_transport_config_is_rejected(self) -> None:
+        cases = {
+            "video_payload_bytes": "200",
+            "video_payload_bytes_large": "1401",
+            "video": '"tcp"',
+            "control": '"udp"',
+            "audio_up": '"udp"',
+            "audio_down": '"udp"',
+        }
+        for field, value in cases.items():
+            field_name = "video_payload_bytes" if field.startswith("video_payload_bytes") else field
+            with self.subTest(field=field):
+                with tempfile.TemporaryDirectory() as tmp:
+                    config_path = Path(tmp) / "config.toml"
+                    config_path.write_text(
+                        f"[device.transport]\n{field_name} = {value}\n",
+                        encoding="utf-8",
+                    )
+
+                    with self.assertRaisesRegex(ValueError, r"device\.transport"):
                         load_config(config_path)
 
     def test_device_id_is_required_and_length_limited(self) -> None:

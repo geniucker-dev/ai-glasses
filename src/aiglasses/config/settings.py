@@ -50,11 +50,23 @@ class DeviceAudioDownConfig:
 
 
 @dataclass(frozen=True)
+class DeviceTransportConfig:
+    video: str = "ws"
+    video_payload_bytes: int = 1200
+    video_reorder_window_ms: int = 120
+    video_frame_timeout_ms: int = 180
+    control: str = "ws"
+    audio_up: str = "ws"
+    audio_down: str = "ws"
+
+
+@dataclass(frozen=True)
 class DeviceConfig:
     id: str = "xiao-esp32s3-sense-01"
     wifi: DeviceWifiConfig = field(default_factory=DeviceWifiConfig)
     capture: DeviceCaptureConfig = field(default_factory=DeviceCaptureConfig)
     audio_down: DeviceAudioDownConfig = field(default_factory=DeviceAudioDownConfig)
+    transport: DeviceTransportConfig = field(default_factory=DeviceTransportConfig)
 
 
 @dataclass(frozen=True)
@@ -157,6 +169,7 @@ def _validate_config(config: AppConfig) -> None:
             f"Config value device.id must be at most {DEVICE_ID_MAX_BYTES} UTF-8 bytes"
         )
     capture = config.device.capture
+    transport = config.device.transport
     _validate_int_range("device.capture.video_fps", capture.video_fps, minimum=1, maximum=1000)
     _validate_int_range("device.capture.jpeg_quality", capture.jpeg_quality, minimum=1, maximum=63)
     _validate_int_range("device.capture.audio_sample_rate", capture.audio_sample_rate, minimum=1)
@@ -165,6 +178,30 @@ def _validate_config(config: AppConfig) -> None:
     _validate_int_range("models.image_width", config.models.image_width, minimum=1)
     _validate_int_range("models.image_height", config.models.image_height, minimum=1)
     _validate_int_range("asr.sample_rate", config.asr.sample_rate, minimum=1)
+    _validate_int_range(
+        "device.transport.video_payload_bytes",
+        transport.video_payload_bytes,
+        minimum=256,
+        maximum=1400,
+    )
+    _validate_int_range(
+        "device.transport.video_reorder_window_ms",
+        transport.video_reorder_window_ms,
+        minimum=0,
+        maximum=5000,
+    )
+    _validate_int_range(
+        "device.transport.video_frame_timeout_ms",
+        transport.video_frame_timeout_ms,
+        minimum=10,
+        maximum=5000,
+    )
+    for field_name in ("video", "control", "audio_up", "audio_down"):
+        value = getattr(transport, field_name)
+        if value not in {"ws", "udp"}:
+            raise ValueError(f"Config value device.transport.{field_name} must be 'ws' or 'udp'")
+    if transport.control != "ws" or transport.audio_up != "ws" or transport.audio_down != "ws":
+        raise ValueError("Only device.transport.video supports udp; control/audio transports must be 'ws'")
     audio_chunk_bytes = (
         capture.audio_sample_rate * capture.audio_chunk_ms * BYTES_PER_PCM16_SAMPLE // 1000
     )
@@ -200,13 +237,14 @@ def load_config(path: str | Path = "config.toml") -> AppConfig:
     _reject_unknown_top_level_sections(raw)
 
     device = _section(raw, "device")
-    device_unknown = sorted(set(device) - {"id", "wifi", "capture", "audio_down"})
+    device_unknown = sorted(set(device) - {"id", "wifi", "capture", "audio_down", "transport"})
     if device_unknown:
         field_list = ", ".join(device_unknown)
         raise ValueError(f"Unknown config field in [device]: {field_list}")
     capture = _section(device, "capture")
     wifi = _section(device, "wifi")
     audio_down = _section(device, "audio_down")
+    transport = _section(device, "transport")
     vision = _section(raw, "vision")
     vision_unknown = sorted(set(vision) - {"thresholds"})
     if vision_unknown:
@@ -221,6 +259,7 @@ def load_config(path: str | Path = "config.toml") -> AppConfig:
             wifi=_build_section("device.wifi", DeviceWifiConfig, wifi),
             capture=_build_section("device.capture", DeviceCaptureConfig, capture),
             audio_down=_build_section("device.audio_down", DeviceAudioDownConfig, audio_down),
+            transport=_build_section("device.transport", DeviceTransportConfig, transport),
         ),
         models=_build_section("models", ModelsConfig, _section(raw, "models")),
         vision_thresholds=_build_section(

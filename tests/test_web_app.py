@@ -7,9 +7,12 @@ from fastapi.testclient import TestClient
 from aiglasses.config import AppConfig, SpeechConfig
 from aiglasses.config.settings import AsrConfig, DeviceCaptureConfig
 from aiglasses.config.settings import DeviceAudioDownConfig, DeviceConfig
+from aiglasses.config.settings import DeviceTransportConfig
 from aiglasses.protocol import Packet, PacketType
 from aiglasses.web.app import (
     CONTROL_MAX_PAYLOAD_BYTES,
+    UdpVideoReassembler,
+    VIDEO_FRAGMENT_HEADER,
     _receive_current_device_packet,
     _unpack_device_packet,
     validate_speech_config,
@@ -19,9 +22,23 @@ from aiglasses.web.app import (
 class FakeBroadcastManager:
     def __init__(self) -> None:
         self.messages: list[dict] = []
+        self.video_udp_seen_count = 0
 
     async def broadcast(self, message: dict) -> None:
         self.messages.append(message)
+
+    def mark_video_udp_seen(self) -> None:
+        self.video_udp_seen_count += 1
+
+    async def handle_video_packet(self, packet: Packet) -> None:
+        self.messages.append(
+            {
+                "kind": "video",
+                "seq": packet.seq,
+                "timestamp_ms": packet.timestamp_ms,
+                "payload": packet.payload,
+            }
+        )
 
 
 class FakeDeviceWebSocket:
@@ -46,6 +63,25 @@ class FakeCurrentManager:
 
     async def broadcast(self, message: dict) -> None:
         self.messages.append(message)
+
+
+def reassembler_fragment_header(
+    *,
+    session_id: int = 1,
+    frame_id: int,
+    frame_len: int,
+    offset: int,
+    chunk_index: int,
+    chunk_count: int,
+) -> bytes:
+    return VIDEO_FRAGMENT_HEADER.pack(
+        session_id,
+        frame_id,
+        frame_len,
+        offset,
+        chunk_index,
+        chunk_count,
+    )
 
 
 class WebAppTests(unittest.TestCase):
@@ -364,6 +400,213 @@ class WebAppTests(unittest.TestCase):
         self.assertIsNotNone(packet)
         self.assertEqual(packet.payload, b"{}")
         self.assertEqual(manager.messages, [])
+
+    def test_udp_video_reassembler_evicts_expired_frames(self) -> None:
+        config = AppConfig(
+            path=Path("config.toml"),
+            device=DeviceConfig(
+                transport=DeviceTransportConfig(
+                    video_frame_timeout_ms=10,
+                    video_reorder_window_ms=0,
+                )
+            ),
+        )
+        reassembler = UdpVideoReassembler(FakeBroadcastManager(), config)
+        reassembler.frames[1] = {"created_at": 0.0}
+
+        reassembler._drop_expired(now=1.0)
+
+        self.assertEqual(reassembler.frames, {})
+
+    def test_udp_video_reassembler_completes_out_of_order_fragments(self) -> None:
+        config = AppConfig(
+            path=Path("config.toml"),
+            device=DeviceConfig(transport=DeviceTransportConfig(video_payload_bytes=4)),
+        )
+        manager = FakeBroadcastManager()
+        reassembler = UdpVideoReassembler(manager, config)
+
+        async def run() -> None:
+            fragments = [
+                (4, 1, b"ef"),
+                (0, 0, b"abcd"),
+            ]
+            for offset, chunk_index, chunk in fragments:
+                raw = Packet(
+                    PacketType.VIDEO_JPEG_FRAGMENT,
+                    seq=chunk_index,
+                    timestamp_ms=100,
+                    payload=reassembler_fragment_header(
+                        frame_id=7,
+                        frame_len=6,
+                        offset=offset,
+                        chunk_index=chunk_index,
+                        chunk_count=2,
+                    )
+                    + chunk,
+                ).pack()
+                await reassembler.handle_datagram(raw, ("127.0.0.1", 12345))
+
+        asyncio.run(run())
+
+        video_messages = [message for message in manager.messages if message["kind"] == "video"]
+        self.assertEqual(len(video_messages), 1)
+        self.assertEqual(video_messages[0]["payload"], b"abcdef")
+        self.assertEqual(manager.video_udp_seen_count, 1)
+
+    def test_udp_video_reassembler_handles_duplicate_fragments(self) -> None:
+        config = AppConfig(
+            path=Path("config.toml"),
+            device=DeviceConfig(transport=DeviceTransportConfig(video_payload_bytes=4)),
+        )
+        manager = FakeBroadcastManager()
+        reassembler = UdpVideoReassembler(manager, config)
+
+        async def send(offset: int, chunk_index: int, chunk: bytes) -> None:
+            raw = Packet(
+                PacketType.VIDEO_JPEG_FRAGMENT,
+                seq=chunk_index,
+                timestamp_ms=100,
+                payload=reassembler_fragment_header(
+                    frame_id=8,
+                    frame_len=6,
+                    offset=offset,
+                    chunk_index=chunk_index,
+                    chunk_count=2,
+                )
+                + chunk,
+            ).pack()
+            await reassembler.handle_datagram(raw, ("127.0.0.1", 12345))
+
+        async def run() -> None:
+            await send(0, 0, b"abcd")
+            await send(0, 0, b"abcd")
+            await send(4, 1, b"ef")
+
+        asyncio.run(run())
+
+        video_messages = [message for message in manager.messages if message["kind"] == "video"]
+        self.assertEqual(len(video_messages), 1)
+        self.assertEqual(video_messages[0]["payload"], b"abcdef")
+
+    def test_udp_video_reassembler_rejects_misaligned_fragment_offset(self) -> None:
+        config = AppConfig(
+            path=Path("config.toml"),
+            device=DeviceConfig(transport=DeviceTransportConfig(video_payload_bytes=4)),
+        )
+        manager = FakeBroadcastManager()
+        reassembler = UdpVideoReassembler(manager, config)
+        raw = Packet(
+            PacketType.VIDEO_JPEG_FRAGMENT,
+            seq=1,
+            timestamp_ms=100,
+            payload=reassembler_fragment_header(
+                frame_id=9,
+                frame_len=8,
+                offset=2,
+                chunk_index=1,
+                chunk_count=2,
+            )
+            + b"efgh",
+        ).pack()
+
+        asyncio.run(reassembler.handle_datagram(raw, ("127.0.0.1", 12345)))
+
+        self.assertEqual([message["kind"] for message in manager.messages], ["device_error"])
+        self.assertIn("misaligned", manager.messages[0]["error"])
+        self.assertEqual(manager.video_udp_seen_count, 0)
+
+    def test_udp_video_reassembler_marks_seen_only_after_complete_frame(self) -> None:
+        config = AppConfig(
+            path=Path("config.toml"),
+            device=DeviceConfig(transport=DeviceTransportConfig(video_payload_bytes=4)),
+        )
+        manager = FakeBroadcastManager()
+        reassembler = UdpVideoReassembler(manager, config)
+        raw = Packet(
+            PacketType.VIDEO_JPEG_FRAGMENT,
+            seq=1,
+            timestamp_ms=100,
+            payload=reassembler_fragment_header(
+                frame_id=10,
+                frame_len=6,
+                offset=0,
+                chunk_index=0,
+                chunk_count=2,
+            )
+            + b"abcd",
+        ).pack()
+
+        asyncio.run(reassembler.handle_datagram(raw, ("127.0.0.1", 12345)))
+
+        self.assertEqual(manager.video_udp_seen_count, 0)
+        self.assertEqual(manager.messages, [])
+
+    def test_udp_video_reassembler_drops_late_completed_older_frame(self) -> None:
+        config = AppConfig(path=Path("config.toml"))
+        manager = FakeBroadcastManager()
+        reassembler = UdpVideoReassembler(manager, config)
+
+        async def send_fragment(frame_id: int, payload: bytes) -> None:
+            fragment_header = reassembler_fragment_header(
+                frame_id=frame_id,
+                frame_len=len(payload),
+                offset=0,
+                chunk_index=0,
+                chunk_count=1,
+            )
+            raw = Packet(
+                PacketType.VIDEO_JPEG_FRAGMENT,
+                seq=frame_id,
+                timestamp_ms=1000 + frame_id,
+                payload=fragment_header + payload,
+            ).pack()
+            await reassembler.handle_datagram(raw, ("127.0.0.1", 12345))
+
+        async def run() -> None:
+            await send_fragment(11, b"newer")
+            await send_fragment(10, b"older")
+
+        asyncio.run(run())
+
+        self.assertEqual(
+            [message["seq"] for message in manager.messages if message["kind"] == "video"],
+            [11],
+        )
+
+    def test_udp_video_reassembler_accepts_frame_id_reset_for_new_session(self) -> None:
+        config = AppConfig(path=Path("config.toml"))
+        manager = FakeBroadcastManager()
+        reassembler = UdpVideoReassembler(manager, config)
+
+        async def send_fragment(session_id: int, frame_id: int, payload: bytes) -> None:
+            raw = Packet(
+                PacketType.VIDEO_JPEG_FRAGMENT,
+                seq=frame_id,
+                timestamp_ms=1000 + frame_id,
+                payload=reassembler_fragment_header(
+                    session_id=session_id,
+                    frame_id=frame_id,
+                    frame_len=len(payload),
+                    offset=0,
+                    chunk_index=0,
+                    chunk_count=1,
+                )
+                + payload,
+            ).pack()
+            await reassembler.handle_datagram(raw, ("127.0.0.1", 12345))
+
+        async def run() -> None:
+            await send_fragment(100, 11, b"before-reboot")
+            await send_fragment(200, 0, b"after-reboot")
+            await send_fragment(100, 12, b"late-old-session")
+
+        asyncio.run(run())
+
+        self.assertEqual(
+            [message["payload"] for message in manager.messages if message["kind"] == "video"],
+            [b"before-reboot", b"after-reboot"],
+        )
 
 
 if __name__ == "__main__":
