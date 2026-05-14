@@ -14,6 +14,13 @@ def _cstr(value: object) -> str:
     return f'"{escaped}"'
 
 
+def _cbytes_from_hex(value: str, expected_bytes: int) -> str:
+    data = bytes.fromhex(value)
+    if len(data) != expected_bytes:
+        raise ValueError(f"expected {expected_bytes} bytes, got {len(data)}")
+    return "{" + ", ".join(f"0x{byte:02X}" for byte in data) + "}"
+
+
 FRAME_SIZE_MACROS = {
     "96X96": "FRAMESIZE_96X96",
     "QQVGA": "FRAMESIZE_QQVGA",
@@ -48,6 +55,23 @@ FRAME_SIZE_VIDEO_PACKET_CAPACITY = {
     "UXGA": MAX_PAYLOAD_BYTES,
 }
 
+FRAME_SIZE_DIMENSIONS = {
+    "96X96": (96, 96),
+    "QQVGA": (160, 120),
+    "QCIF": (176, 144),
+    "HQVGA": (240, 176),
+    "240X240": (240, 240),
+    "QVGA": (320, 240),
+    "CIF": (400, 296),
+    "HVGA": (480, 320),
+    "VGA": (640, 480),
+    "SVGA": (800, 600),
+    "XGA": (1024, 768),
+    "HD": (1280, 720),
+    "SXGA": (1280, 1024),
+    "UXGA": (1600, 1200),
+}
+
 CAMERA_PROFILE_MACROS = {
     "DEFAULT": "AGL_CAMERA_PROFILE_DEFAULT",
     "TRAFFIC_SIGNAL": "AGL_CAMERA_PROFILE_TRAFFIC_SIGNAL",
@@ -68,6 +92,10 @@ def _frame_size_macro(value: str) -> str:
 
 def _video_packet_capacity(value: str) -> int:
     return FRAME_SIZE_VIDEO_PACKET_CAPACITY[_frame_size_key(value)]
+
+
+def _frame_size_dimensions(value: str) -> tuple[int, int]:
+    return FRAME_SIZE_DIMENSIONS[_frame_size_key(value)]
 
 
 def _camera_profile_macro(value: str) -> str:
@@ -96,6 +124,7 @@ def render_header(config_path: str | Path) -> str:
     device = config.device
     capture = device.capture
     transport = device.transport
+    frame_width, frame_height = _frame_size_dimensions(capture.frame_size)
 
     return f"""#pragma once
 
@@ -108,6 +137,8 @@ def render_header(config_path: str | Path) -> str:
 #define AGL_VIDEO_PACKET_CAPACITY {_video_packet_capacity(capture.frame_size)}
 #define AGL_JPEG_QUALITY {int(capture.jpeg_quality)}
 #define AGL_FRAME_SIZE {_frame_size_macro(capture.frame_size)}
+#define AGL_FRAME_WIDTH_PIXELS {frame_width}
+#define AGL_FRAME_HEIGHT_PIXELS {frame_height}
 #define AGL_CAMERA_PROFILE {_camera_profile_macro(capture.camera_profile)}
 #define AGL_AUDIO_SAMPLE_RATE {int(capture.audio_sample_rate)}
 #define AGL_AUDIO_CHUNK_MS {int(capture.audio_chunk_ms)}
@@ -115,6 +146,7 @@ def render_header(config_path: str | Path) -> str:
 #define AGL_AUDIO_DOWN_ENABLED {1 if device.audio_down.enabled else 0}
 #define AGL_VIDEO_TRANSPORT_UDP {1 if transport.video == "udp" else 0}
 #define AGL_VIDEO_UDP_CHUNK_BYTES {int(transport.video_payload_bytes)}
+#define AGL_VIDEO_AUTH_KEY {_cbytes_from_hex(transport.video_auth_key_hex or "00" * 32, 32)}
 """
 
 

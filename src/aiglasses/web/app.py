@@ -3,6 +3,8 @@ from __future__ import annotations
 import asyncio
 import base64
 from contextlib import asynccontextmanager
+import hashlib
+import hmac
 import logging
 from pathlib import Path
 import struct
@@ -27,7 +29,37 @@ logger = logging.getLogger("aiglasses.web")
 CONTROL_MAX_PAYLOAD_BYTES = 8 * 1024
 AUDIO_MAX_PAYLOAD_BYTES = 64 * 1024
 VIDEO_MAX_PAYLOAD_BYTES = MAX_PAYLOAD_BYTES
-VIDEO_FRAGMENT_HEADER = struct.Struct("<IQIIHH")
+RTP_HEADER = struct.Struct("!BBHII")
+RTP_JPEG_HEADER = struct.Struct("!B3sBBBB")
+RTP_JPEG_QTABLE_HEADER = struct.Struct("!BBH")
+RTP_VERSION = 2
+RTP_JPEG_PAYLOAD_TYPE = 26
+RTP_JPEG_DYNAMIC_Q = 255
+RTP_TIMESTAMP_HALF_RANGE = 1 << 31
+RTP_EXTENSION_HEADER = struct.Struct("!HH")
+RTP_AUTH_EXTENSION_PROFILE = 0xA147
+RTP_AUTH_EXTENSION_MAGIC = b"AGLA"
+RTP_AUTH_TAG_BYTES = 16
+RTP_AUTH_EXTENSION_BYTES = len(RTP_AUTH_EXTENSION_MAGIC) + RTP_AUTH_TAG_BYTES
+RTP_AUTH_EXTENSION_WORDS = RTP_AUTH_EXTENSION_BYTES // 4
+
+JPEG_STD_DHT = bytes.fromhex(
+    "ffc401a2"
+    "0000010501010101010100000000000000000102030405060708090a0b"
+    "100002010303020403050504040000017d0102030004110512213141061351610722"
+    "7114328191a1082342b1c11552d1f02433627282090a161718191a25262728292a"
+    "3435363738393a434445464748494a535455565758595a636465666768696a7374"
+    "75767778797a838485868788898a92939495969798999aa2a3a4a5a6a7a8a9aa"
+    "b2b3b4b5b6b7b8b9bac2c3c4c5c6c7c8c9cad2d3d4d5d6d7d8d9dae1e2e3"
+    "e4e5e6e7e8e9eaf1f2f3f4f5f6f7f8f9fa"
+    "0100030101010101010101010000000000000102030405060708090a0b"
+    "110002010204040304070504040001027700010203110405213106124151076171"
+    "1322328108144291a1b1c109233352f0156272d10a162434e125f11718191a26"
+    "2728292a35363738393a434445464748494a535455565758595a636465666768"
+    "696a737475767778797a82838485868788898a92939495969798999aa2a3a4a5"
+    "a6a7a8a9aab2b3b4b5b6b7b8b9bac2c3c4c5c6c7c8c9cad2d3d4d5d6d7d8"
+    "d9dae2e3e4e5e6e7e8e9eaf2f3f4f5f6f7f8f9fa"
+)
 
 
 def _is_websocket_state_error(exc: RuntimeError) -> bool:
@@ -73,51 +105,79 @@ async def _receive_current_device_packet(
 
 
 class UdpVideoReassembler:
+    # RTP/JPEG over RTP. This accepts the RFC 2435 variants emitted by the ESP32 firmware:
+    # baseline JPEG type 0/1 with dynamic 8-bit quantization tables.
     def __init__(self, manager: DeviceManager, config: AppConfig):
         self.manager = manager
         self.config = config
         self.frames: dict[int, dict[str, Any]] = {}
         self.active_session_id: int | None = None
         self.retired_session_ids: set[int] = set()
-        self.last_completed_frame_id = -1
+        self.last_completed_timestamp: int | None = None
+        self.video_auth_key = bytes.fromhex(config.device.transport.video_auth_key_hex)
         self.lock = asyncio.Lock()
 
     async def handle_datagram(self, data: bytes, addr: tuple[str, int]) -> None:
-        max_fragment_payload = (
-            VIDEO_FRAGMENT_HEADER.size + self.config.device.transport.video_payload_bytes
-        )
         try:
-            packet = Packet.unpack(data, max_payload_bytes=max_fragment_payload)
-            if packet.packet_type != PacketType.VIDEO_JPEG_FRAGMENT:
-                raise ProtocolError(f"unexpected udp video packet: {packet.packet_type}")
-            if len(packet.payload) < VIDEO_FRAGMENT_HEADER.size:
-                raise ProtocolError("video fragment payload too short")
+            if len(data) < RTP_HEADER.size + RTP_EXTENSION_HEADER.size + RTP_AUTH_EXTENSION_BYTES:
+                raise ProtocolError("rtp/jpeg packet too short")
+            first, second, _sequence, timestamp, ssrc = RTP_HEADER.unpack(data[: RTP_HEADER.size])
+            version = first >> 6
+            has_padding = bool(first & 0x20)
+            has_extension = bool(first & 0x10)
+            csrc_count = first & 0x0F
+            marker = bool(second & 0x80)
+            payload_type = second & 0x7F
+            if version != RTP_VERSION:
+                raise ProtocolError(f"unsupported rtp version: {version}")
+            if has_padding or csrc_count:
+                raise ProtocolError("unsupported rtp padding/csrc")
+            if payload_type != RTP_JPEG_PAYLOAD_TYPE:
+                raise ProtocolError(f"unexpected rtp payload type: {payload_type}")
+            jpeg_start = self._authenticated_payload_start(data, has_extension)
+            if len(data) < jpeg_start + RTP_JPEG_HEADER.size:
+                raise ProtocolError("rtp/jpeg header truncated")
             (
-                session_id,
-                frame_id,
-                frame_len,
-                offset,
-                chunk_index,
-                chunk_count,
-            ) = VIDEO_FRAGMENT_HEADER.unpack(packet.payload[: VIDEO_FRAGMENT_HEADER.size])
-            chunk = packet.payload[VIDEO_FRAGMENT_HEADER.size :]
+                _type_specific,
+                fragment_offset_bytes,
+                jpeg_type,
+                quality,
+                width_blocks,
+                height_blocks,
+            ) = RTP_JPEG_HEADER.unpack(data[jpeg_start : jpeg_start + RTP_JPEG_HEADER.size])
+            if jpeg_type not in {0, 1}:
+                raise ProtocolError(f"unsupported rtp/jpeg type: {jpeg_type}")
+            if quality != RTP_JPEG_DYNAMIC_Q:
+                raise ProtocolError("only rtp/jpeg dynamic quantization tables are supported")
+            if width_blocks == 0 or height_blocks == 0:
+                raise ProtocolError("invalid rtp/jpeg dimensions")
+            fragment_offset = int.from_bytes(fragment_offset_bytes, "big")
+            payload_start = jpeg_start + RTP_JPEG_HEADER.size
+            quant_tables: bytes | None = None
+            if fragment_offset == 0:
+                if len(data) < payload_start + RTP_JPEG_QTABLE_HEADER.size:
+                    raise ProtocolError("rtp/jpeg quantization header missing")
+                _mbz, precision, qtable_len = RTP_JPEG_QTABLE_HEADER.unpack(
+                    data[payload_start : payload_start + RTP_JPEG_QTABLE_HEADER.size]
+                )
+                if precision != 0:
+                    raise ProtocolError("rtp/jpeg 16-bit quantization tables are not supported")
+                if qtable_len != 128:
+                    raise ProtocolError("rtp/jpeg quantization table length must be 128")
+                qtable_start = payload_start + RTP_JPEG_QTABLE_HEADER.size
+                qtable_end = qtable_start + qtable_len
+                if len(data) < qtable_end:
+                    raise ProtocolError("rtp/jpeg quantization table truncated")
+                quant_tables = data[qtable_start:qtable_end]
+                payload_start = qtable_end
+            chunk = data[payload_start:]
             chunk_bytes = self.config.device.transport.video_payload_bytes
-            expected_chunk_count = (frame_len + chunk_bytes - 1) // chunk_bytes
-            expected_offset = chunk_index * chunk_bytes
-            expected_chunk_len = (
-                chunk_bytes if chunk_index + 1 < chunk_count else frame_len - expected_offset
-            )
-            if frame_len == 0 or frame_len > VIDEO_MAX_PAYLOAD_BYTES:
-                raise ProtocolError(f"video frame too large: {frame_len}")
-            if chunk_count == 0 or chunk_index >= chunk_count:
-                raise ProtocolError("invalid video fragment index")
-            if chunk_count != expected_chunk_count:
-                raise ProtocolError("invalid video fragment count")
-            if offset != expected_offset:
-                raise ProtocolError("misaligned video fragment offset")
-            if len(chunk) != expected_chunk_len:
-                raise ProtocolError("invalid video fragment length")
-            if offset + len(chunk) > frame_len:
+            if not chunk:
+                raise ProtocolError("empty rtp/jpeg fragment")
+            if len(chunk) > chunk_bytes:
+                raise ProtocolError("video fragment exceeds configured payload size")
+            fragment_end = fragment_offset + len(chunk)
+            if fragment_end > VIDEO_MAX_PAYLOAD_BYTES:
                 raise ProtocolError("video fragment exceeds frame length")
         except ProtocolError as exc:
             logger.warning("dropping bad udp video packet from %s: %s", addr, exc)
@@ -130,48 +190,216 @@ class UdpVideoReassembler:
         now = time.monotonic()
         async with self.lock:
             if self.active_session_id is None:
-                self.active_session_id = session_id
-            elif session_id != self.active_session_id:
-                if session_id in self.retired_session_ids:
+                self.active_session_id = ssrc
+            elif ssrc != self.active_session_id:
+                if ssrc in self.retired_session_ids:
                     return
                 self.retired_session_ids.add(self.active_session_id)
-                self.active_session_id = session_id
-                self.last_completed_frame_id = -1
+                self.active_session_id = ssrc
+                self.last_completed_timestamp = None
                 self.frames.clear()
             self._drop_expired(now)
-            frame = self.frames.get(frame_id)
+            if self.last_completed_timestamp is not None and not self._rtp_timestamp_newer(
+                timestamp, self.last_completed_timestamp
+            ):
+                return
+            frame = self.frames.get(timestamp)
             if frame is None:
                 frame = {
                     "created_at": now,
-                    "frame_len": frame_len,
-                    "chunk_count": chunk_count,
-                    "buffer": bytearray(frame_len),
-                    "seen": set(),
+                    "fragments": {},
                     "received": 0,
-                    "timestamp_ms": packet.timestamp_ms,
+                    "final_len": None,
+                    "jpeg_type": jpeg_type,
+                    "width_blocks": width_blocks,
+                    "height_blocks": height_blocks,
+                    "quant_tables": None,
                 }
-                self.frames[frame_id] = frame
-            if frame["frame_len"] != frame_len or frame["chunk_count"] != chunk_count:
-                self.frames.pop(frame_id, None)
-                logger.warning("dropping inconsistent udp video frame id=%s from %s", frame_id, addr)
+                self.frames[timestamp] = frame
+            if (
+                frame["jpeg_type"] != jpeg_type
+                or frame["width_blocks"] != width_blocks
+                or frame["height_blocks"] != height_blocks
+            ):
+                self.frames.pop(timestamp, None)
+                logger.warning("dropping inconsistent rtp/jpeg frame ts=%s from %s", timestamp, addr)
                 return
-            seen: set[int] = frame["seen"]
-            if chunk_index not in seen:
-                buffer: bytearray = frame["buffer"]
-                buffer[offset : offset + len(chunk)] = chunk
-                seen.add(chunk_index)
-                frame["received"] += len(chunk)
-            if len(seen) == chunk_count and frame["received"] >= frame_len:
-                self.frames.pop(frame_id, None)
-                if frame_id > self.last_completed_frame_id:
-                    complete_payload = bytes(frame["buffer"])
-                    self.last_completed_frame_id = frame_id
+            fragments: dict[int, bytes] = frame["fragments"]
+            existing = fragments.get(fragment_offset)
+            if existing is not None:
+                if existing != chunk or (
+                    quant_tables is not None
+                    and frame["quant_tables"] is not None
+                    and frame["quant_tables"] != quant_tables
+                ):
+                    self.frames.pop(timestamp, None)
+                    logger.warning(
+                        "dropping inconsistent duplicate rtp/jpeg fragment ts=%s from %s",
+                        timestamp,
+                        addr,
+                    )
+                return
+            if quant_tables is not None:
+                if frame["quant_tables"] is not None and frame["quant_tables"] != quant_tables:
+                    self.frames.pop(timestamp, None)
+                    logger.warning(
+                        "dropping inconsistent rtp/jpeg quantization tables ts=%s from %s",
+                        timestamp,
+                        addr,
+                    )
+                    return
+                frame["quant_tables"] = quant_tables
+            if any(
+                fragment_offset < offset + len(payload) and fragment_end > offset
+                for offset, payload in fragments.items()
+            ):
+                self.frames.pop(timestamp, None)
+                logger.warning("dropping overlapping rtp/jpeg frame ts=%s from %s", timestamp, addr)
+                return
+            fragments[fragment_offset] = chunk
+            frame["received"] += len(chunk)
+            if marker:
+                frame["final_len"] = fragment_end
+            final_len: int | None = frame["final_len"]
+            if final_len is not None and frame["received"] >= final_len:
+                complete_payload = self._assemble_frame(fragments, final_len)
+                self.frames.pop(timestamp, None)
+                if complete_payload is not None:
+                    quant_tables = frame["quant_tables"]
+                    if quant_tables is None:
+                        return
+                    complete_payload = self._build_jpeg(
+                        complete_payload,
+                        jpeg_type=frame["jpeg_type"],
+                        width_blocks=frame["width_blocks"],
+                        height_blocks=frame["height_blocks"],
+                        quant_tables=quant_tables,
+                    )
+                    self.last_completed_timestamp = timestamp
 
         if complete_payload is not None:
             self.manager.mark_video_udp_seen()
             await self.manager.handle_video_packet(
-                Packet(PacketType.VIDEO_JPEG, frame_id, packet.timestamp_ms, complete_payload)
+                Packet(PacketType.VIDEO_JPEG, timestamp, int(time.time() * 1000), complete_payload)
             )
+
+    def _assemble_frame(self, fragments: dict[int, bytes], final_len: int) -> bytes | None:
+        offset = 0
+        parts: list[bytes] = []
+        for fragment_offset in sorted(fragments):
+            if fragment_offset != offset:
+                return None
+            payload = fragments[fragment_offset]
+            parts.append(payload)
+            offset += len(payload)
+        if offset != final_len:
+            return None
+        return b"".join(parts)
+
+    @staticmethod
+    def _authentication_data(data: bytes, extension_start: int, payload_start: int) -> bytes:
+        tag_start = extension_start + RTP_EXTENSION_HEADER.size + len(RTP_AUTH_EXTENSION_MAGIC)
+        return b"".join(
+            [
+                data[:extension_start],
+                data[extension_start:tag_start],
+                data[payload_start:],
+            ]
+        )
+
+    def _authenticated_payload_start(self, data: bytes, has_extension: bool) -> int:
+        if not has_extension:
+            raise ProtocolError("rtp authentication extension missing")
+        extension_start = RTP_HEADER.size
+        extension_header_end = extension_start + RTP_EXTENSION_HEADER.size
+        profile, extension_words = RTP_EXTENSION_HEADER.unpack(
+            data[extension_start:extension_header_end]
+        )
+        extension_len = extension_words * 4
+        extension_end = extension_header_end + extension_len
+        if len(data) < extension_end:
+            raise ProtocolError("rtp authentication extension truncated")
+        if profile != RTP_AUTH_EXTENSION_PROFILE:
+            raise ProtocolError("unexpected rtp authentication extension profile")
+        if extension_words != RTP_AUTH_EXTENSION_WORDS:
+            raise ProtocolError("invalid rtp authentication extension length")
+        extension = data[extension_header_end:extension_end]
+        if not extension.startswith(RTP_AUTH_EXTENSION_MAGIC):
+            raise ProtocolError("invalid rtp authentication extension magic")
+        received_tag = extension[len(RTP_AUTH_EXTENSION_MAGIC) :]
+        auth_data = self._authentication_data(data, extension_start, extension_end)
+        expected_tag = hmac.new(self.video_auth_key, auth_data, hashlib.sha256).digest()[
+            :RTP_AUTH_TAG_BYTES
+        ]
+        if not hmac.compare_digest(received_tag, expected_tag):
+            raise ProtocolError("invalid rtp authentication tag")
+        return extension_end
+
+    @staticmethod
+    def _rtp_timestamp_newer(timestamp: int, previous: int) -> bool:
+        delta = (timestamp - previous) & 0xFFFFFFFF
+        return 0 < delta < RTP_TIMESTAMP_HALF_RANGE
+
+    def _build_jpeg(
+        self,
+        scan_data: bytes,
+        *,
+        jpeg_type: int,
+        width_blocks: int,
+        height_blocks: int,
+        quant_tables: bytes,
+    ) -> bytes:
+        width = width_blocks * 8
+        height = height_blocks * 8
+        luma_sampling = 0x21 if jpeg_type == 0 else 0x22
+        return b"".join(
+            [
+                b"\xff\xd8",
+                self._dqt_segment(0, quant_tables[:64]),
+                self._dqt_segment(1, quant_tables[64:128]),
+                JPEG_STD_DHT,
+                self._sof0_segment(width, height, luma_sampling),
+                self._sos_segment(),
+                scan_data,
+                b"\xff\xd9",
+            ]
+        )
+
+    @staticmethod
+    def _dqt_segment(table_id: int, table: bytes) -> bytes:
+        return b"\xff\xdb" + struct.pack("!H", 67) + bytes([table_id]) + table
+
+    @staticmethod
+    def _sof0_segment(width: int, height: int, luma_sampling: int) -> bytes:
+        return (
+            b"\xff\xc0"
+            + struct.pack("!H", 17)
+            + bytes(
+                [
+                    8,
+                    (height >> 8) & 0xFF,
+                    height & 0xFF,
+                    (width >> 8) & 0xFF,
+                    width & 0xFF,
+                    3,
+                    1,
+                    luma_sampling,
+                    0,
+                    2,
+                    0x11,
+                    1,
+                    3,
+                    0x11,
+                    1,
+                ]
+            )
+        )
+
+    @staticmethod
+    def _sos_segment() -> bytes:
+        return b"\xff\xda" + struct.pack("!H", 12) + bytes(
+            [3, 1, 0, 2, 0x11, 3, 0x11, 0, 63, 0]
+        )
 
     def _drop_expired(self, now: float) -> None:
         timeout_ms = max(
@@ -180,12 +408,12 @@ class UdpVideoReassembler:
         )
         timeout_s = timeout_ms / 1000
         expired = [
-            frame_id
-            for frame_id, frame in self.frames.items()
+            timestamp
+            for timestamp, frame in self.frames.items()
             if now - frame["created_at"] > timeout_s
         ]
-        for frame_id in expired:
-            self.frames.pop(frame_id, None)
+        for timestamp in expired:
+            self.frames.pop(timestamp, None)
 
 
 class UdpVideoProtocol(asyncio.DatagramProtocol):

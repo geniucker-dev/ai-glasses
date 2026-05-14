@@ -21,9 +21,13 @@ imu_hz = 50
 
 [device.transport]
 video = "udp"
+# RTP/JPEG payload budget per UDP packet; datagrams also carry 20 bytes of RTP/JPEG headers.
+# The first packet of each frame additionally spends 132 bytes on quantization tables.
 video_payload_bytes = 1200
 video_reorder_window_ms = 120
 video_frame_timeout_ms = 180
+# This example key is public. Generate a deployment key with: openssl rand -hex 32
+video_auth_key_hex = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 control = "ws"
 audio_up = "ws"
 audio_down = "ws"

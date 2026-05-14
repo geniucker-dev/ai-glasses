@@ -5,7 +5,9 @@
 #include <ctype.h>
 #include <esp_camera.h>
 #include <esp_heap_caps.h>
+#include <esp_timer.h>
 #include <esp_wifi.h>
+#include <mbedtls/md.h>
 #include <SPI.h>
 #include "ESP_I2S.h"
 #include "camera_pins.h"
@@ -41,14 +43,68 @@ static constexpr int MAX_TARGET_VIDEO_FPS = 1000;
 #ifndef AGL_VIDEO_UDP_CHUNK_BYTES
 #define AGL_VIDEO_UDP_CHUNK_BYTES 1200
 #endif
+#ifndef AGL_VIDEO_AUTH_KEY
+#define AGL_VIDEO_AUTH_KEY {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}
+#endif
 
 static constexpr int AUDIO_BYTES_PER_CHUNK = AGL_AUDIO_SAMPLE_RATE * AGL_AUDIO_CHUNK_MS / 1000 * 2;
 static constexpr size_t PACKET_HEADER_SIZE = sizeof(PacketHeader);
 static constexpr size_t CONTROL_PACKET_CAPACITY = 1024;
 static constexpr size_t VIDEO_PACKET_CAPACITY = AGL_VIDEO_PACKET_CAPACITY;
-static constexpr size_t VIDEO_FRAGMENT_HEADER_SIZE = 24;
+static constexpr size_t RTP_HEADER_SIZE = 12;
+static constexpr size_t RTP_JPEG_HEADER_SIZE = 8;
+static constexpr size_t RTP_JPEG_QTABLE_HEADER_SIZE = 4;
+static constexpr size_t RTP_JPEG_QTABLE_BYTES = 128;
+static constexpr uint8_t RTP_JPEG_PAYLOAD_TYPE = 26;
+static constexpr uint8_t RTP_JPEG_DYNAMIC_Q = 255;
+static constexpr uint32_t RTP_VIDEO_CLOCK_HZ = 90000;
+static constexpr size_t RTP_EXTENSION_HEADER_SIZE = 4;
+static constexpr size_t RTP_AUTH_EXTENSION_BYTES = 20;
+static constexpr size_t RTP_AUTH_TAG_BYTES = 16;
+static constexpr uint16_t RTP_AUTH_EXTENSION_PROFILE = 0xA147;
+static constexpr uint16_t RTP_AUTH_EXTENSION_WORDS = RTP_AUTH_EXTENSION_BYTES / 4;
 static constexpr size_t SPEECH_SAMPLES_PER_WRITE = 256;
 static constexpr size_t SPEECH_PCM16_MAX_PAYLOAD = 64 * 1024;
+static const uint8_t RTP_AUTH_MAGIC[4] = {'A', 'G', 'L', 'A'};
+static const uint8_t VIDEO_AUTH_KEY[32] = AGL_VIDEO_AUTH_KEY;
+static const uint8_t JPEG_STD_DHT[] = {
+  0xFF, 0xC4, 0x01, 0xA2, 0x00, 0x00, 0x01, 0x05, 0x01, 0x01, 0x01, 0x01,
+  0x01, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x02,
+  0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A, 0x0B, 0x10, 0x00, 0x02,
+  0x01, 0x03, 0x03, 0x02, 0x04, 0x03, 0x05, 0x05, 0x04, 0x04, 0x00, 0x00,
+  0x01, 0x7D, 0x01, 0x02, 0x03, 0x00, 0x04, 0x11, 0x05, 0x12, 0x21, 0x31,
+  0x41, 0x06, 0x13, 0x51, 0x61, 0x07, 0x22, 0x71, 0x14, 0x32, 0x81, 0x91,
+  0xA1, 0x08, 0x23, 0x42, 0xB1, 0xC1, 0x15, 0x52, 0xD1, 0xF0, 0x24, 0x33,
+  0x62, 0x72, 0x82, 0x09, 0x0A, 0x16, 0x17, 0x18, 0x19, 0x1A, 0x25, 0x26,
+  0x27, 0x28, 0x29, 0x2A, 0x34, 0x35, 0x36, 0x37, 0x38, 0x39, 0x3A, 0x43,
+  0x44, 0x45, 0x46, 0x47, 0x48, 0x49, 0x4A, 0x53, 0x54, 0x55, 0x56, 0x57,
+  0x58, 0x59, 0x5A, 0x63, 0x64, 0x65, 0x66, 0x67, 0x68, 0x69, 0x6A, 0x73,
+  0x74, 0x75, 0x76, 0x77, 0x78, 0x79, 0x7A, 0x83, 0x84, 0x85, 0x86, 0x87,
+  0x88, 0x89, 0x8A, 0x92, 0x93, 0x94, 0x95, 0x96, 0x97, 0x98, 0x99, 0x9A,
+  0xA2, 0xA3, 0xA4, 0xA5, 0xA6, 0xA7, 0xA8, 0xA9, 0xAA, 0xB2, 0xB3, 0xB4,
+  0xB5, 0xB6, 0xB7, 0xB8, 0xB9, 0xBA, 0xC2, 0xC3, 0xC4, 0xC5, 0xC6, 0xC7,
+  0xC8, 0xC9, 0xCA, 0xD2, 0xD3, 0xD4, 0xD5, 0xD6, 0xD7, 0xD8, 0xD9, 0xDA,
+  0xE1, 0xE2, 0xE3, 0xE4, 0xE5, 0xE6, 0xE7, 0xE8, 0xE9, 0xEA, 0xF1, 0xF2,
+  0xF3, 0xF4, 0xF5, 0xF6, 0xF7, 0xF8, 0xF9, 0xFA, 0x01, 0x00, 0x03, 0x01,
+  0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x00, 0x00, 0x00, 0x00,
+  0x00, 0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A,
+  0x0B, 0x11, 0x00, 0x02, 0x01, 0x02, 0x04, 0x04, 0x03, 0x04, 0x07, 0x05,
+  0x04, 0x04, 0x00, 0x01, 0x02, 0x77, 0x00, 0x01, 0x02, 0x03, 0x11, 0x04,
+  0x05, 0x21, 0x31, 0x06, 0x12, 0x41, 0x51, 0x07, 0x61, 0x71, 0x13, 0x22,
+  0x32, 0x81, 0x08, 0x14, 0x42, 0x91, 0xA1, 0xB1, 0xC1, 0x09, 0x23, 0x33,
+  0x52, 0xF0, 0x15, 0x62, 0x72, 0xD1, 0x0A, 0x16, 0x24, 0x34, 0xE1, 0x25,
+  0xF1, 0x17, 0x18, 0x19, 0x1A, 0x26, 0x27, 0x28, 0x29, 0x2A, 0x35, 0x36,
+  0x37, 0x38, 0x39, 0x3A, 0x43, 0x44, 0x45, 0x46, 0x47, 0x48, 0x49, 0x4A,
+  0x53, 0x54, 0x55, 0x56, 0x57, 0x58, 0x59, 0x5A, 0x63, 0x64, 0x65, 0x66,
+  0x67, 0x68, 0x69, 0x6A, 0x73, 0x74, 0x75, 0x76, 0x77, 0x78, 0x79, 0x7A,
+  0x82, 0x83, 0x84, 0x85, 0x86, 0x87, 0x88, 0x89, 0x8A, 0x92, 0x93, 0x94,
+  0x95, 0x96, 0x97, 0x98, 0x99, 0x9A, 0xA2, 0xA3, 0xA4, 0xA5, 0xA6, 0xA7,
+  0xA8, 0xA9, 0xAA, 0xB2, 0xB3, 0xB4, 0xB5, 0xB6, 0xB7, 0xB8, 0xB9, 0xBA,
+  0xC2, 0xC3, 0xC4, 0xC5, 0xC6, 0xC7, 0xC8, 0xC9, 0xCA, 0xD2, 0xD3, 0xD4,
+  0xD5, 0xD6, 0xD7, 0xD8, 0xD9, 0xDA, 0xE2, 0xE3, 0xE4, 0xE5, 0xE6, 0xE7,
+  0xE8, 0xE9, 0xEA, 0xF2, 0xF3, 0xF4, 0xF5, 0xF6, 0xF7, 0xF8, 0xF9, 0xFA,
+};
+static const uint8_t JPEG_STD_SOS[] = {3, 1, 0, 2, 0x11, 3, 0x11, 0, 63, 0};
 
 WebsocketsClient wsControl;
 WebsocketsClient wsVideo;
@@ -74,8 +130,10 @@ volatile bool runtimeTrafficSignalProfile = AGL_CAMERA_PROFILE == AGL_CAMERA_PRO
 uint64_t seqControl = 0;
 uint64_t seqVideo = 0;
 uint64_t seqAudio = 0;
-uint64_t frameVideo = 0;
-uint32_t videoSessionId = 0;
+uint16_t rtpVideoSequence = 0;
+uint32_t rtpVideoTimestampBase = 0;
+int64_t rtpVideoStartUs = 0;
+uint32_t videoSsrc = 0;
 
 static uint8_t audioPacket[PACKET_HEADER_SIZE + AUDIO_BYTES_PER_CHUNK];
 static uint8_t audioRaw[AUDIO_BYTES_PER_CHUNK];
@@ -85,6 +143,15 @@ static uint8_t* videoPacket = nullptr;
 SemaphoreHandle_t controlMutex = nullptr;
 SemaphoreHandle_t videoMutex = nullptr;
 SemaphoreHandle_t audioMutex = nullptr;
+
+struct RtpJpegFrame {
+  const uint8_t* scan = nullptr;
+  uint32_t scanLen = 0;
+  uint8_t quantTables[RTP_JPEG_QTABLE_BYTES];
+  uint8_t jpegType = 1;
+  uint8_t widthBlocks = 0;
+  uint8_t heightBlocks = 0;
+};
 
 bool fill_packet(uint8_t* packet, size_t capacity, PacketType type, uint64_t& seq, const uint8_t* payload, uint32_t len) {
   if (!packet || capacity < PACKET_HEADER_SIZE || len > capacity - PACKET_HEADER_SIZE) return false;
@@ -115,17 +182,184 @@ bool send_packet(WebsocketsClient& ws, SemaphoreHandle_t mutex, PacketType type,
   return sent;
 }
 
-void write_u16_le(uint8_t* out, uint16_t value) {
-  out[0] = (uint8_t)(value & 0xFF);
+void write_u16_be(uint8_t* out, uint16_t value) {
+  out[0] = (uint8_t)((value >> 8) & 0xFF);
+  out[1] = (uint8_t)(value & 0xFF);
+}
+
+void write_u24_be(uint8_t* out, uint32_t value) {
+  out[0] = (uint8_t)((value >> 16) & 0xFF);
   out[1] = (uint8_t)((value >> 8) & 0xFF);
+  out[2] = (uint8_t)(value & 0xFF);
 }
 
-void write_u32_le(uint8_t* out, uint32_t value) {
-  for (int i = 0; i < 4; ++i) out[i] = (uint8_t)((value >> (8 * i)) & 0xFF);
+void write_u32_be(uint8_t* out, uint32_t value) {
+  out[0] = (uint8_t)((value >> 24) & 0xFF);
+  out[1] = (uint8_t)((value >> 16) & 0xFF);
+  out[2] = (uint8_t)((value >> 8) & 0xFF);
+  out[3] = (uint8_t)(value & 0xFF);
 }
 
-void write_u64_le(uint8_t* out, uint64_t value) {
-  for (int i = 0; i < 8; ++i) out[i] = (uint8_t)((value >> (8 * i)) & 0xFF);
+uint16_t read_u16_be(const uint8_t* data) {
+  return (uint16_t)((data[0] << 8) | data[1]);
+}
+
+uint32_t rtp_video_timestamp_now() {
+  int64_t elapsedUs = esp_timer_get_time() - rtpVideoStartUs;
+  if (elapsedUs < 0) elapsedUs = 0;
+  uint64_t ticks = ((uint64_t)elapsedUs * RTP_VIDEO_CLOCK_HZ) / 1000000ULL;
+  return rtpVideoTimestampBase + (uint32_t)ticks;
+}
+
+bool write_rtp_auth_tag(uint8_t* packet, uint32_t payloadOffset, uint32_t packetLen) {
+  const mbedtls_md_info_t* info = mbedtls_md_info_from_type(MBEDTLS_MD_SHA256);
+  if (!info) return false;
+  mbedtls_md_context_t ctx;
+  mbedtls_md_init(&ctx);
+  uint8_t digest[32];
+  bool ok = mbedtls_md_setup(&ctx, info, 1) == 0 &&
+    mbedtls_md_hmac_starts(&ctx, VIDEO_AUTH_KEY, sizeof(VIDEO_AUTH_KEY)) == 0 &&
+    mbedtls_md_hmac_update(&ctx, packet, RTP_HEADER_SIZE) == 0 &&
+    mbedtls_md_hmac_update(&ctx, packet + RTP_HEADER_SIZE, RTP_EXTENSION_HEADER_SIZE) == 0 &&
+    mbedtls_md_hmac_update(&ctx,
+                           packet + RTP_HEADER_SIZE + RTP_EXTENSION_HEADER_SIZE,
+                           sizeof(RTP_AUTH_MAGIC)) == 0 &&
+    mbedtls_md_hmac_update(&ctx, packet + payloadOffset, packetLen - payloadOffset) == 0 &&
+    mbedtls_md_hmac_finish(&ctx, digest) == 0;
+  mbedtls_md_free(&ctx);
+  if (!ok) return false;
+  memcpy(packet + RTP_HEADER_SIZE + RTP_EXTENSION_HEADER_SIZE + sizeof(RTP_AUTH_MAGIC),
+         digest,
+         RTP_AUTH_TAG_BYTES);
+  return true;
+}
+
+bool sof0_matches_rtp_jpeg_subset(const uint8_t* segment, uint16_t dataLen) {
+  if (dataLen < 15 || segment[0] != 8 || segment[5] != 3) return false;
+  if (segment[6] != 1 || segment[8] != 0) return false;
+  if (segment[9] != 2 || segment[10] != 0x11 || segment[11] != 1) return false;
+  if (segment[12] != 3 || segment[13] != 0x11 || segment[14] != 1) return false;
+  return segment[7] == 0x21 || segment[7] == 0x22;
+}
+
+uint16_t dht_table_len(const uint8_t* table, uint16_t available) {
+  if (available < 17) return 0;
+  uint16_t symbols = 0;
+  for (uint8_t i = 1; i <= 16; ++i) symbols += table[i];
+  uint16_t tableLen = 17 + symbols;
+  return tableLen <= available ? tableLen : 0;
+}
+
+bool dht_table_matches_standard(const uint8_t* table, uint16_t tableLen, uint8_t& tableBit) {
+  uint16_t pos = 4;
+  uint16_t stdLen = sizeof(JPEG_STD_DHT);
+  while (pos < stdLen) {
+    uint16_t candidateLen = dht_table_len(JPEG_STD_DHT + pos, stdLen - pos);
+    if (candidateLen == 0) return false;
+    if (candidateLen == tableLen && memcmp(table, JPEG_STD_DHT + pos, tableLen) == 0) {
+      uint8_t info = table[0];
+      if (info == 0x00) tableBit = 0x01;
+      else if (info == 0x10) tableBit = 0x02;
+      else if (info == 0x01) tableBit = 0x04;
+      else if (info == 0x11) tableBit = 0x08;
+      else return false;
+      return true;
+    }
+    pos += candidateLen;
+  }
+  return false;
+}
+
+bool dht_segment_matches_rtp_jpeg_subset(const uint8_t* segment,
+                                         uint16_t dataLen,
+                                         uint8_t& tableMask) {
+  uint16_t pos = 0;
+  while (pos < dataLen) {
+    uint16_t tableLen = dht_table_len(segment + pos, dataLen - pos);
+    if (tableLen == 0) return false;
+    uint8_t tableBit = 0;
+    if (!dht_table_matches_standard(segment + pos, tableLen, tableBit)) return false;
+    tableMask |= tableBit;
+    pos += tableLen;
+  }
+  return pos == dataLen;
+}
+
+bool parse_rtp_jpeg_frame(const uint8_t* jpeg, uint32_t len, RtpJpegFrame& out) {
+  // Packetize the camera JPEG into the RFC 2435 baseline JPEG variants understood by the backend.
+  if (!jpeg || len < 4 || jpeg[0] != 0xFF || jpeg[1] != 0xD8) return false;
+  bool haveQ0 = false;
+  bool haveQ1 = false;
+  bool haveSof = false;
+  uint8_t dhtTableMask = 0;
+  uint32_t pos = 2;
+
+  while (pos + 4 <= len) {
+    while (pos < len && jpeg[pos] != 0xFF) pos++;
+    if (pos + 1 >= len) return false;
+    while (pos + 1 < len && jpeg[pos + 1] == 0xFF) pos++;
+    uint8_t marker = jpeg[pos + 1];
+    pos += 2;
+
+    if (marker == 0xD9) break;
+    if (marker == 0xDA) {
+      if (pos + 2 > len) return false;
+      uint16_t segLen = read_u16_be(jpeg + pos);
+      if (segLen < 2 || pos + segLen > len) return false;
+      if (segLen != sizeof(JPEG_STD_SOS) + 2 ||
+          memcmp(jpeg + pos + 2, JPEG_STD_SOS, sizeof(JPEG_STD_SOS)) != 0) {
+        return false;
+      }
+      out.scan = jpeg + pos + segLen;
+      uint32_t scanEnd = len;
+      if (len >= 2 && jpeg[len - 2] == 0xFF && jpeg[len - 1] == 0xD9) {
+        scanEnd = len - 2;
+      }
+      if (scanEnd <= pos + segLen) return false;
+      out.scanLen = scanEnd - (pos + segLen);
+      return haveQ0 && haveQ1 && haveSof;
+    }
+    if ((marker >= 0xD0 && marker <= 0xD7) || marker == 0x01) continue;
+    if (pos + 2 > len) return false;
+    uint16_t segLen = read_u16_be(jpeg + pos);
+    if (segLen < 2 || pos + segLen > len) return false;
+    const uint8_t* segment = jpeg + pos + 2;
+    uint16_t dataLen = segLen - 2;
+
+    if (marker == 0xDB) {
+      uint16_t tablePos = 0;
+      while (tablePos + 65 <= dataLen) {
+        uint8_t info = segment[tablePos++];
+        uint8_t precision = info >> 4;
+        uint8_t tableId = info & 0x0F;
+        if (precision != 0) return false;
+        if (tableId <= 1) {
+          memcpy(out.quantTables + tableId * 64, segment + tablePos, 64);
+          if (tableId == 0) haveQ0 = true;
+          else haveQ1 = true;
+        }
+        tablePos += 64;
+      }
+      if (tablePos != dataLen) return false;
+    } else if (marker == 0xC0) {
+      if (!sof0_matches_rtp_jpeg_subset(segment, dataLen)) return false;
+      uint16_t height = read_u16_be(segment + 1);
+      uint16_t width = read_u16_be(segment + 3);
+      uint8_t lumaSampling = segment[7];
+      if (lumaSampling == 0x21) out.jpegType = 0;
+      else if (lumaSampling == 0x22) out.jpegType = 1;
+      else return false;
+      out.widthBlocks = (uint8_t)min(255, max(1, (int)((width + 7) / 8)));
+      out.heightBlocks = (uint8_t)min(255, max(1, (int)((height + 7) / 8)));
+      haveSof = true;
+    } else if (marker == 0xC4) {
+      if (!dht_segment_matches_rtp_jpeg_subset(segment, dataLen, dhtTableMask)) return false;
+    } else if (marker == 0xDD) {
+      return false;
+    }
+    pos += segLen;
+  }
+  return false;
 }
 
 bool setup_udp_video() {
@@ -148,43 +382,77 @@ bool setup_udp_video() {
 
 bool send_udp_video_frame(const uint8_t* jpeg, uint32_t len) {
   if (!videoReady || !videoPacket || AGL_VIDEO_UDP_CHUNK_BYTES == 0) return false;
-  uint32_t chunkBytes = min((uint32_t)AGL_VIDEO_UDP_CHUNK_BYTES, (uint32_t)1400);
-  uint32_t chunkCount = (len + chunkBytes - 1) / chunkBytes;
-  if (chunkCount == 0 || chunkCount > 65535) return false;
-  uint64_t frameId = frameVideo++;
+  RtpJpegFrame frame;
+  if (!parse_rtp_jpeg_frame(jpeg, len, frame)) {
+    Serial.println("[UDP video] unsupported JPEG for RTP/JPEG packetization");
+    return false;
+  }
+  uint32_t authHeaderBytes = RTP_EXTENSION_HEADER_SIZE + RTP_AUTH_EXTENSION_BYTES;
+  uint32_t maxPayloadBytes = min((uint32_t)AGL_VIDEO_UDP_CHUNK_BYTES, (uint32_t)1400);
+  if (maxPayloadBytes <= RTP_JPEG_QTABLE_HEADER_SIZE + RTP_JPEG_QTABLE_BYTES) return false;
+  uint32_t frameTimestamp = rtp_video_timestamp_now();
   bool ok = true;
 
   if (xSemaphoreTake(videoMutex, pdMS_TO_TICKS(250)) != pdTRUE) return false;
-  for (uint32_t chunkIndex = 0; chunkIndex < chunkCount; ++chunkIndex) {
-    uint32_t offset = chunkIndex * chunkBytes;
-    uint32_t partLen = min(chunkBytes, len - offset);
-    uint8_t fragmentHeader[VIDEO_FRAGMENT_HEADER_SIZE];
-    write_u32_le(fragmentHeader, videoSessionId);
-    write_u64_le(fragmentHeader + 4, frameId);
-    write_u32_le(fragmentHeader + 12, len);
-    write_u32_le(fragmentHeader + 16, offset);
-    write_u16_le(fragmentHeader + 20, (uint16_t)chunkIndex);
-    write_u16_le(fragmentHeader + 22, (uint16_t)chunkCount);
-
-    uint32_t payloadLen = VIDEO_FRAGMENT_HEADER_SIZE + partLen;
-    if (PACKET_HEADER_SIZE + payloadLen > VIDEO_PACKET_CAPACITY) {
+  uint32_t offset = 0;
+  while (offset < frame.scanLen) {
+    bool firstPacket = offset == 0;
+    uint32_t headerExtra = firstPacket
+      ? (RTP_JPEG_QTABLE_HEADER_SIZE + RTP_JPEG_QTABLE_BYTES)
+      : 0;
+    uint32_t partCapacity = maxPayloadBytes - headerExtra;
+    uint32_t partLen = min(partCapacity, frame.scanLen - offset);
+    bool marker = offset + partLen >= frame.scanLen;
+    uint32_t packetLen = RTP_HEADER_SIZE + authHeaderBytes + RTP_JPEG_HEADER_SIZE +
+      headerExtra + partLen;
+    if (packetLen > VIDEO_PACKET_CAPACITY) {
       ok = false;
       break;
     }
-    memcpy(videoPacket + PACKET_HEADER_SIZE, fragmentHeader, VIDEO_FRAGMENT_HEADER_SIZE);
-    memcpy(videoPacket + PACKET_HEADER_SIZE + VIDEO_FRAGMENT_HEADER_SIZE, jpeg + offset, partLen);
-    write_packet_header(
-        videoPacket,
-        PKT_VIDEO_JPEG_FRAGMENT,
-        seqVideo++,
-        videoPacket + PACKET_HEADER_SIZE,
-        payloadLen);
+
+    videoPacket[0] = 0x90;
+    videoPacket[1] = (marker ? 0x80 : 0x00) | RTP_JPEG_PAYLOAD_TYPE;
+    write_u16_be(videoPacket + 2, rtpVideoSequence++);
+    write_u32_be(videoPacket + 4, frameTimestamp);
+    write_u32_be(videoPacket + 8, videoSsrc);
+
+    size_t extensionHeader = RTP_HEADER_SIZE;
+    write_u16_be(videoPacket + extensionHeader, RTP_AUTH_EXTENSION_PROFILE);
+    write_u16_be(videoPacket + extensionHeader + 2, RTP_AUTH_EXTENSION_WORDS);
+    size_t extensionData = extensionHeader + RTP_EXTENSION_HEADER_SIZE;
+    memcpy(videoPacket + extensionData, RTP_AUTH_MAGIC, sizeof(RTP_AUTH_MAGIC));
+    memset(videoPacket + extensionData + sizeof(RTP_AUTH_MAGIC), 0, RTP_AUTH_TAG_BYTES);
+
+    size_t jpegHeader = RTP_HEADER_SIZE + authHeaderBytes;
+    videoPacket[jpegHeader] = 0;
+    write_u24_be(videoPacket + jpegHeader + 1, offset);
+    videoPacket[jpegHeader + 4] = frame.jpegType;
+    videoPacket[jpegHeader + 5] = RTP_JPEG_DYNAMIC_Q;
+    videoPacket[jpegHeader + 6] = frame.widthBlocks;
+    videoPacket[jpegHeader + 7] = frame.heightBlocks;
+
+    size_t payloadOffset = RTP_HEADER_SIZE + authHeaderBytes + RTP_JPEG_HEADER_SIZE;
+    if (firstPacket) {
+      videoPacket[payloadOffset] = 0;
+      videoPacket[payloadOffset + 1] = 0;
+      write_u16_be(videoPacket + payloadOffset + 2, RTP_JPEG_QTABLE_BYTES);
+      memcpy(videoPacket + payloadOffset + RTP_JPEG_QTABLE_HEADER_SIZE,
+             frame.quantTables,
+             RTP_JPEG_QTABLE_BYTES);
+      payloadOffset += RTP_JPEG_QTABLE_HEADER_SIZE + RTP_JPEG_QTABLE_BYTES;
+    }
+    memcpy(videoPacket + payloadOffset, frame.scan + offset, partLen);
+    if (!write_rtp_auth_tag(videoPacket, RTP_HEADER_SIZE + authHeaderBytes, packetLen)) {
+      ok = false;
+      break;
+    }
     if (!udpVideo.beginPacket(udpVideoRemoteIp, AGL_SERVER_PORT) ||
-        udpVideo.write(videoPacket, PACKET_HEADER_SIZE + payloadLen) != PACKET_HEADER_SIZE + payloadLen ||
+        udpVideo.write(videoPacket, packetLen) != packetLen ||
         udpVideo.endPacket() != 1) {
       ok = false;
       break;
     }
+    offset += partLen;
   }
   xSemaphoreGive(videoMutex);
   if (!ok) Serial.println("[UDP video] frame send failed");
@@ -660,7 +928,10 @@ void setup() {
     delay(1500);
     esp_restart();
   }
-  videoSessionId = esp_random();
+  rtpVideoSequence = (uint16_t)(esp_random() & 0xFFFF);
+  rtpVideoTimestampBase = esp_random();
+  rtpVideoStartUs = esp_timer_get_time();
+  videoSsrc = esp_random();
   connect_wifi();
   if (!init_camera()) {
     delay(1500);

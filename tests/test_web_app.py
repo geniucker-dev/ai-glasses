@@ -1,8 +1,15 @@
 import asyncio
+import hashlib
+import hmac
+import io
+import struct
 import unittest
 from pathlib import Path
 
+import cv2
 from fastapi.testclient import TestClient
+import numpy as np
+from PIL import Image
 
 from aiglasses.config import AppConfig, SpeechConfig
 from aiglasses.config.settings import AsrConfig, DeviceCaptureConfig
@@ -11,12 +18,22 @@ from aiglasses.config.settings import DeviceTransportConfig
 from aiglasses.protocol import Packet, PacketType
 from aiglasses.web.app import (
     CONTROL_MAX_PAYLOAD_BYTES,
+    RTP_AUTH_EXTENSION_MAGIC,
+    RTP_AUTH_EXTENSION_PROFILE,
+    RTP_AUTH_EXTENSION_WORDS,
+    RTP_AUTH_TAG_BYTES,
+    RTP_EXTENSION_HEADER,
+    RTP_HEADER,
+    RTP_JPEG_DYNAMIC_Q,
+    RTP_JPEG_HEADER,
+    RTP_JPEG_PAYLOAD_TYPE,
     UdpVideoReassembler,
-    VIDEO_FRAGMENT_HEADER,
     _receive_current_device_packet,
     _unpack_device_packet,
     validate_speech_config,
 )
+
+TEST_VIDEO_AUTH_KEY_HEX = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 
 
 class FakeBroadcastManager:
@@ -65,23 +82,132 @@ class FakeCurrentManager:
         self.messages.append(message)
 
 
-def reassembler_fragment_header(
+def rtp_jpeg_packet(
     *,
-    session_id: int = 1,
-    frame_id: int,
-    frame_len: int,
+    ssrc: int = 1,
+    timestamp: int,
     offset: int,
-    chunk_index: int,
-    chunk_count: int,
+    sequence: int,
+    marker: bool,
+    payload: bytes,
+    version: int = 2,
+    payload_type: int = RTP_JPEG_PAYLOAD_TYPE,
+    first_byte_flags: int = 0,
+    jpeg_type: int = 1,
+    quality: int = RTP_JPEG_DYNAMIC_Q,
+    width_blocks: int = 100,
+    height_blocks: int = 75,
+    quant_tables: bytes | None = None,
+    auth_key_hex: str = TEST_VIDEO_AUTH_KEY_HEX,
+    authenticated: bool = True,
 ) -> bytes:
-    return VIDEO_FRAGMENT_HEADER.pack(
-        session_id,
-        frame_id,
-        frame_len,
-        offset,
-        chunk_index,
-        chunk_count,
+    first = ((version & 0x03) << 6) | first_byte_flags
+    if authenticated:
+        first |= 0x10
+    rtp_header = RTP_HEADER.pack(
+        first,
+        (0x80 if marker else 0x00) | payload_type,
+        sequence,
+        timestamp,
+        ssrc,
     )
+    jpeg_header = RTP_JPEG_HEADER.pack(
+        0,
+        offset.to_bytes(3, "big"),
+        jpeg_type,
+        quality,
+        width_blocks,
+        height_blocks,
+    )
+    quant_header = b""
+    if offset == 0 and quality == RTP_JPEG_DYNAMIC_Q:
+        tables = bytes(range(128)) if quant_tables is None else quant_tables
+        quant_header = struct.pack("!BBH", 0, 0, len(tables)) + tables
+    payload_bytes = jpeg_header + quant_header + payload
+    if not authenticated:
+        return rtp_header + payload_bytes
+    return authenticated_rtp_packet(rtp_header, payload_bytes, auth_key_hex=auth_key_hex)
+
+
+def authenticated_rtp_packet(
+    rtp_header: bytes,
+    payload_bytes: bytes,
+    *,
+    auth_key_hex: str = TEST_VIDEO_AUTH_KEY_HEX,
+) -> bytes:
+    extension_header = RTP_EXTENSION_HEADER.pack(
+        RTP_AUTH_EXTENSION_PROFILE,
+        RTP_AUTH_EXTENSION_WORDS,
+    )
+    tag = hmac.new(
+        bytes.fromhex(auth_key_hex),
+        rtp_header + extension_header + RTP_AUTH_EXTENSION_MAGIC + payload_bytes,
+        hashlib.sha256,
+    ).digest()[:RTP_AUTH_TAG_BYTES]
+    return rtp_header + extension_header + RTP_AUTH_EXTENSION_MAGIC + tag + payload_bytes
+
+
+def app_config_with_video_auth(**transport_overrides: object) -> AppConfig:
+    transport = DeviceTransportConfig(
+        video_auth_key_hex=TEST_VIDEO_AUTH_KEY_HEX,
+        **transport_overrides,
+    )
+    return AppConfig(path=Path("config.toml"), device=DeviceConfig(transport=transport))
+
+
+def rtp_jpeg_parts_from_jpeg(jpeg: bytes) -> tuple[int, int, int, bytes, bytes]:
+    quant_tables: dict[int, bytes] = {}
+    jpeg_type: int | None = None
+    width_blocks: int | None = None
+    height_blocks: int | None = None
+    pos = 2
+    if not jpeg.startswith(b"\xff\xd8"):
+        raise AssertionError("fixture is not a JPEG")
+    while pos + 4 <= len(jpeg):
+        while pos < len(jpeg) and jpeg[pos] != 0xFF:
+            pos += 1
+        while pos + 1 < len(jpeg) and jpeg[pos + 1] == 0xFF:
+            pos += 1
+        marker = jpeg[pos + 1]
+        pos += 2
+        if marker == 0xDA:
+            segment_len = int.from_bytes(jpeg[pos : pos + 2], "big")
+            scan_start = pos + segment_len
+            scan_end = len(jpeg) - 2 if jpeg.endswith(b"\xff\xd9") else len(jpeg)
+            return (
+                jpeg_type if jpeg_type is not None else 1,
+                width_blocks if width_blocks is not None else 1,
+                height_blocks if height_blocks is not None else 1,
+                quant_tables[0] + quant_tables[1],
+                jpeg[scan_start:scan_end],
+            )
+        segment_len = int.from_bytes(jpeg[pos : pos + 2], "big")
+        segment = jpeg[pos + 2 : pos + segment_len]
+        if marker == 0xDB:
+            table_pos = 0
+            while table_pos + 65 <= len(segment):
+                info = segment[table_pos]
+                table_pos += 1
+                precision = info >> 4
+                table_id = info & 0x0F
+                if precision != 0:
+                    raise AssertionError("fixture uses non-8-bit quantization tables")
+                quant_tables[table_id] = segment[table_pos : table_pos + 64]
+                table_pos += 64
+        elif marker == 0xC0:
+            height = int.from_bytes(segment[1:3], "big")
+            width = int.from_bytes(segment[3:5], "big")
+            sampling = segment[7]
+            if sampling == 0x21:
+                jpeg_type = 0
+            elif sampling == 0x22:
+                jpeg_type = 1
+            else:
+                raise AssertionError(f"unsupported fixture sampling: {sampling:#x}")
+            width_blocks = (width + 7) // 8
+            height_blocks = (height + 7) // 8
+        pos += segment_len
+    raise AssertionError("fixture has no SOS segment")
 
 
 class WebAppTests(unittest.TestCase):
@@ -432,14 +558,9 @@ class WebAppTests(unittest.TestCase):
         self.assertEqual(manager.messages, [])
 
     def test_udp_video_reassembler_evicts_expired_frames(self) -> None:
-        config = AppConfig(
-            path=Path("config.toml"),
-            device=DeviceConfig(
-                transport=DeviceTransportConfig(
-                    video_frame_timeout_ms=10,
-                    video_reorder_window_ms=0,
-                )
-            ),
+        config = app_config_with_video_auth(
+            video_frame_timeout_ms=10,
+            video_reorder_window_ms=0,
         )
         reassembler = UdpVideoReassembler(FakeBroadcastManager(), config)
         reassembler.frames[1] = {"created_at": 0.0}
@@ -449,123 +570,279 @@ class WebAppTests(unittest.TestCase):
         self.assertEqual(reassembler.frames, {})
 
     def test_udp_video_reassembler_completes_out_of_order_fragments(self) -> None:
-        config = AppConfig(
-            path=Path("config.toml"),
-            device=DeviceConfig(transport=DeviceTransportConfig(video_payload_bytes=4)),
-        )
+        config = app_config_with_video_auth(video_payload_bytes=4)
         manager = FakeBroadcastManager()
         reassembler = UdpVideoReassembler(manager, config)
 
         async def run() -> None:
             fragments = [
-                (4, 1, b"ef"),
-                (0, 0, b"abcd"),
+                (4, 2, True, b"ef"),
+                (0, 1, False, b"abcd"),
             ]
-            for offset, chunk_index, chunk in fragments:
-                raw = Packet(
-                    PacketType.VIDEO_JPEG_FRAGMENT,
-                    seq=chunk_index,
-                    timestamp_ms=100,
-                    payload=reassembler_fragment_header(
-                        frame_id=7,
-                        frame_len=6,
-                        offset=offset,
-                        chunk_index=chunk_index,
-                        chunk_count=2,
-                    )
-                    + chunk,
-                ).pack()
+            for offset, sequence, marker, chunk in fragments:
+                raw = rtp_jpeg_packet(
+                    timestamp=90_000,
+                    offset=offset,
+                    sequence=sequence,
+                    marker=marker,
+                    payload=chunk,
+                )
                 await reassembler.handle_datagram(raw, ("127.0.0.1", 12345))
 
         asyncio.run(run())
 
         video_messages = [message for message in manager.messages if message["kind"] == "video"]
         self.assertEqual(len(video_messages), 1)
-        self.assertEqual(video_messages[0]["payload"], b"abcdef")
+        self.assertTrue(video_messages[0]["payload"].startswith(b"\xff\xd8"))
+        self.assertIn(b"abcdef", video_messages[0]["payload"])
+        self.assertTrue(video_messages[0]["payload"].endswith(b"\xff\xd9"))
         self.assertEqual(manager.video_udp_seen_count, 1)
 
     def test_udp_video_reassembler_handles_duplicate_fragments(self) -> None:
-        config = AppConfig(
-            path=Path("config.toml"),
-            device=DeviceConfig(transport=DeviceTransportConfig(video_payload_bytes=4)),
-        )
+        config = app_config_with_video_auth(video_payload_bytes=4)
         manager = FakeBroadcastManager()
         reassembler = UdpVideoReassembler(manager, config)
 
-        async def send(offset: int, chunk_index: int, chunk: bytes) -> None:
-            raw = Packet(
-                PacketType.VIDEO_JPEG_FRAGMENT,
-                seq=chunk_index,
-                timestamp_ms=100,
-                payload=reassembler_fragment_header(
-                    frame_id=8,
-                    frame_len=6,
-                    offset=offset,
-                    chunk_index=chunk_index,
-                    chunk_count=2,
-                )
-                + chunk,
-            ).pack()
+        async def send(offset: int, sequence: int, marker: bool, chunk: bytes) -> None:
+            raw = rtp_jpeg_packet(
+                timestamp=180_000,
+                offset=offset,
+                sequence=sequence,
+                marker=marker,
+                payload=chunk,
+            )
             await reassembler.handle_datagram(raw, ("127.0.0.1", 12345))
 
         async def run() -> None:
-            await send(0, 0, b"abcd")
-            await send(0, 0, b"abcd")
-            await send(4, 1, b"ef")
+            await send(0, 1, False, b"abcd")
+            await send(0, 1, False, b"abcd")
+            await send(4, 2, True, b"ef")
 
         asyncio.run(run())
 
         video_messages = [message for message in manager.messages if message["kind"] == "video"]
         self.assertEqual(len(video_messages), 1)
-        self.assertEqual(video_messages[0]["payload"], b"abcdef")
+        self.assertIn(b"abcdef", video_messages[0]["payload"])
 
-    def test_udp_video_reassembler_rejects_misaligned_fragment_offset(self) -> None:
-        config = AppConfig(
-            path=Path("config.toml"),
-            device=DeviceConfig(transport=DeviceTransportConfig(video_payload_bytes=4)),
-        )
+    def test_udp_video_reassembler_rejects_duplicate_first_fragment_with_changed_qtables(
+        self,
+    ) -> None:
+        config = app_config_with_video_auth(video_payload_bytes=4)
         manager = FakeBroadcastManager()
         reassembler = UdpVideoReassembler(manager, config)
-        raw = Packet(
-            PacketType.VIDEO_JPEG_FRAGMENT,
-            seq=1,
-            timestamp_ms=100,
-            payload=reassembler_fragment_header(
-                frame_id=9,
-                frame_len=8,
-                offset=2,
-                chunk_index=1,
-                chunk_count=2,
+
+        async def run() -> None:
+            await reassembler.handle_datagram(
+                rtp_jpeg_packet(
+                    timestamp=225_000,
+                    offset=0,
+                    sequence=1,
+                    marker=False,
+                    payload=b"abcd",
+                    quant_tables=bytes(range(128)),
+                ),
+                ("127.0.0.1", 12345),
             )
-            + b"efgh",
-        ).pack()
+            await reassembler.handle_datagram(
+                rtp_jpeg_packet(
+                    timestamp=225_000,
+                    offset=0,
+                    sequence=2,
+                    marker=False,
+                    payload=b"abcd",
+                    quant_tables=bytes(reversed(range(128))),
+                ),
+                ("127.0.0.1", 12345),
+            )
 
-        asyncio.run(reassembler.handle_datagram(raw, ("127.0.0.1", 12345)))
+        asyncio.run(run())
 
-        self.assertEqual([message["kind"] for message in manager.messages], ["device_error"])
-        self.assertIn("misaligned", manager.messages[0]["error"])
+        self.assertEqual(manager.messages, [])
+        self.assertEqual(reassembler.frames, {})
         self.assertEqual(manager.video_udp_seen_count, 0)
 
-    def test_udp_video_reassembler_marks_seen_only_after_complete_frame(self) -> None:
-        config = AppConfig(
-            path=Path("config.toml"),
-            device=DeviceConfig(transport=DeviceTransportConfig(video_payload_bytes=4)),
-        )
+    def test_udp_video_reassembler_rebuilds_decodable_jpeg(self) -> None:
+        for subsampling, expected_type in ((1, 0), (2, 1)):
+            with self.subTest(subsampling=subsampling):
+                config = app_config_with_video_auth()
+                manager = FakeBroadcastManager()
+                reassembler = UdpVideoReassembler(manager, config)
+                image = Image.new("RGB", (16, 16), (32, 96, 160))
+                jpeg_file = io.BytesIO()
+                image.save(jpeg_file, format="JPEG", quality=75, subsampling=subsampling)
+                (
+                    jpeg_type,
+                    width_blocks,
+                    height_blocks,
+                    quant_tables,
+                    scan_data,
+                ) = rtp_jpeg_parts_from_jpeg(jpeg_file.getvalue())
+                self.assertEqual(jpeg_type, expected_type)
+
+                async def run() -> None:
+                    await reassembler.handle_datagram(
+                        rtp_jpeg_packet(
+                            timestamp=240_000 + subsampling,
+                            offset=0,
+                            sequence=subsampling,
+                            marker=True,
+                            payload=scan_data,
+                            jpeg_type=jpeg_type,
+                            width_blocks=width_blocks,
+                            height_blocks=height_blocks,
+                            quant_tables=quant_tables,
+                        ),
+                        ("127.0.0.1", 12345),
+                    )
+
+                asyncio.run(run())
+
+                video_messages = [
+                    message for message in manager.messages if message["kind"] == "video"
+                ]
+                self.assertEqual(len(video_messages), 1)
+                payload = video_messages[0]["payload"]
+                decoded = cv2.imdecode(np.frombuffer(payload, dtype=np.uint8), cv2.IMREAD_COLOR)
+                self.assertIsNotNone(decoded)
+                self.assertEqual(decoded.shape[:2], (height_blocks * 8, width_blocks * 8))
+
+    def test_udp_video_reassembler_rejects_overlapping_fragment_offset(self) -> None:
+        config = app_config_with_video_auth(video_payload_bytes=4)
         manager = FakeBroadcastManager()
         reassembler = UdpVideoReassembler(manager, config)
-        raw = Packet(
-            PacketType.VIDEO_JPEG_FRAGMENT,
-            seq=1,
-            timestamp_ms=100,
-            payload=reassembler_fragment_header(
-                frame_id=10,
-                frame_len=6,
-                offset=0,
-                chunk_index=0,
-                chunk_count=2,
+
+        async def run() -> None:
+            await reassembler.handle_datagram(
+                rtp_jpeg_packet(
+                    timestamp=270_000,
+                    offset=0,
+                    sequence=1,
+                    marker=False,
+                    payload=b"abcd",
+                ),
+                ("127.0.0.1", 12345),
             )
-            + b"abcd",
-        ).pack()
+            await reassembler.handle_datagram(
+                rtp_jpeg_packet(
+                    timestamp=270_000,
+                    offset=2,
+                    sequence=2,
+                    marker=True,
+                    payload=b"cdef",
+                ),
+                ("127.0.0.1", 12345),
+            )
+
+        asyncio.run(run())
+
+        self.assertEqual([message["kind"] for message in manager.messages], [])
+        self.assertEqual(reassembler.frames, {})
+        self.assertEqual(manager.video_udp_seen_count, 0)
+
+    def test_udp_video_reassembler_rejects_malformed_rtp_header(self) -> None:
+        cases = [
+            ("unsupported rtp version", {"version": 1}),
+            ("unexpected rtp payload type", {"payload_type": 25}),
+            ("unsupported rtp padding/csrc", {"first_byte_flags": 0x20}),
+            ("unsupported rtp padding/csrc", {"first_byte_flags": 0x01}),
+        ]
+        for expected_error, overrides in cases:
+            with self.subTest(expected_error=expected_error):
+                config = app_config_with_video_auth()
+                manager = FakeBroadcastManager()
+                reassembler = UdpVideoReassembler(manager, config)
+                raw = rtp_jpeg_packet(
+                    timestamp=360_000,
+                    offset=0,
+                    sequence=1,
+                    marker=True,
+                    payload=b"abcd",
+                    **overrides,
+                )
+
+                asyncio.run(reassembler.handle_datagram(raw, ("127.0.0.1", 12345)))
+
+                self.assertEqual([message["kind"] for message in manager.messages], ["device_error"])
+                self.assertIn(expected_error, manager.messages[0]["error"])
+                self.assertEqual(manager.video_udp_seen_count, 0)
+
+    def test_udp_video_reassembler_rejects_unauthenticated_rtp(self) -> None:
+        cases = {
+            "rtp authentication extension missing": {"authenticated": False},
+            "invalid rtp authentication tag": {"auth_key_hex": "f" * 64},
+        }
+        for expected_error, overrides in cases.items():
+            with self.subTest(expected_error=expected_error):
+                config = app_config_with_video_auth()
+                manager = FakeBroadcastManager()
+                reassembler = UdpVideoReassembler(manager, config)
+                raw = rtp_jpeg_packet(
+                    timestamp=390_000,
+                    offset=0,
+                    sequence=1,
+                    marker=True,
+                    payload=b"abcd",
+                    **overrides,
+                )
+
+                asyncio.run(reassembler.handle_datagram(raw, ("127.0.0.1", 12345)))
+
+                self.assertEqual([message["kind"] for message in manager.messages], ["device_error"])
+                self.assertIn(expected_error, manager.messages[0]["error"])
+                self.assertEqual(manager.video_udp_seen_count, 0)
+
+    def test_udp_video_reassembler_rejects_authenticated_truncated_jpeg_header(self) -> None:
+        for payload in (b"", b"\x00" * 7):
+            with self.subTest(payload_len=len(payload)):
+                config = app_config_with_video_auth()
+                manager = FakeBroadcastManager()
+                reassembler = UdpVideoReassembler(manager, config)
+                rtp_header = RTP_HEADER.pack(0x90, 0x80 | RTP_JPEG_PAYLOAD_TYPE, 1, 400_000, 1)
+                raw = authenticated_rtp_packet(rtp_header, payload)
+
+                asyncio.run(reassembler.handle_datagram(raw, ("127.0.0.1", 12345)))
+
+                self.assertEqual([message["kind"] for message in manager.messages], ["device_error"])
+                self.assertIn("rtp/jpeg header truncated", manager.messages[0]["error"])
+                self.assertEqual(manager.video_udp_seen_count, 0)
+
+    def test_udp_video_reassembler_rejects_malformed_rtp_jpeg_header(self) -> None:
+        cases = {
+            "unsupported rtp/jpeg type": {"jpeg_type": 2},
+            "only rtp/jpeg dynamic quantization tables are supported": {"quality": 128},
+            "invalid rtp/jpeg dimensions": {"width_blocks": 0},
+        }
+        for expected_error, overrides in cases.items():
+            with self.subTest(expected_error=expected_error):
+                config = app_config_with_video_auth()
+                manager = FakeBroadcastManager()
+                reassembler = UdpVideoReassembler(manager, config)
+                raw = rtp_jpeg_packet(
+                    timestamp=360_000,
+                    offset=0,
+                    sequence=1,
+                    marker=True,
+                    payload=b"abcd",
+                    **overrides,
+                )
+
+                asyncio.run(reassembler.handle_datagram(raw, ("127.0.0.1", 12345)))
+
+                self.assertEqual([message["kind"] for message in manager.messages], ["device_error"])
+                self.assertIn(expected_error, manager.messages[0]["error"])
+                self.assertEqual(manager.video_udp_seen_count, 0)
+
+    def test_udp_video_reassembler_marks_seen_only_after_complete_frame(self) -> None:
+        config = app_config_with_video_auth(video_payload_bytes=4)
+        manager = FakeBroadcastManager()
+        reassembler = UdpVideoReassembler(manager, config)
+        raw = rtp_jpeg_packet(
+            timestamp=360_000,
+            offset=0,
+            sequence=1,
+            marker=False,
+            payload=b"abcd",
+        )
 
         asyncio.run(reassembler.handle_datagram(raw, ("127.0.0.1", 12345)))
 
@@ -573,70 +850,92 @@ class WebAppTests(unittest.TestCase):
         self.assertEqual(manager.messages, [])
 
     def test_udp_video_reassembler_drops_late_completed_older_frame(self) -> None:
-        config = AppConfig(path=Path("config.toml"))
+        config = app_config_with_video_auth()
         manager = FakeBroadcastManager()
         reassembler = UdpVideoReassembler(manager, config)
 
-        async def send_fragment(frame_id: int, payload: bytes) -> None:
-            fragment_header = reassembler_fragment_header(
-                frame_id=frame_id,
-                frame_len=len(payload),
+        async def send_fragment(timestamp: int, sequence: int, payload: bytes) -> None:
+            raw = rtp_jpeg_packet(
+                timestamp=timestamp,
                 offset=0,
-                chunk_index=0,
-                chunk_count=1,
+                sequence=sequence,
+                marker=True,
+                payload=payload,
             )
-            raw = Packet(
-                PacketType.VIDEO_JPEG_FRAGMENT,
-                seq=frame_id,
-                timestamp_ms=1000 + frame_id,
-                payload=fragment_header + payload,
-            ).pack()
             await reassembler.handle_datagram(raw, ("127.0.0.1", 12345))
 
         async def run() -> None:
-            await send_fragment(11, b"newer")
-            await send_fragment(10, b"older")
+            await send_fragment(90_000, 1, b"newer")
+            await send_fragment(45_000, 2, b"older")
 
         asyncio.run(run())
 
         self.assertEqual(
             [message["seq"] for message in manager.messages if message["kind"] == "video"],
-            [11],
+            [90_000],
         )
 
-    def test_udp_video_reassembler_accepts_frame_id_reset_for_new_session(self) -> None:
-        config = AppConfig(path=Path("config.toml"))
+    def test_udp_video_reassembler_accepts_timestamp_wraparound(self) -> None:
+        config = app_config_with_video_auth()
         manager = FakeBroadcastManager()
         reassembler = UdpVideoReassembler(manager, config)
 
-        async def send_fragment(session_id: int, frame_id: int, payload: bytes) -> None:
-            raw = Packet(
-                PacketType.VIDEO_JPEG_FRAGMENT,
-                seq=frame_id,
-                timestamp_ms=1000 + frame_id,
-                payload=reassembler_fragment_header(
-                    session_id=session_id,
-                    frame_id=frame_id,
-                    frame_len=len(payload),
-                    offset=0,
-                    chunk_index=0,
-                    chunk_count=1,
-                )
-                + payload,
-            ).pack()
-            await reassembler.handle_datagram(raw, ("127.0.0.1", 12345))
-
         async def run() -> None:
-            await send_fragment(100, 11, b"before-reboot")
-            await send_fragment(200, 0, b"after-reboot")
-            await send_fragment(100, 12, b"late-old-session")
+            await reassembler.handle_datagram(
+                rtp_jpeg_packet(
+                    timestamp=0xFFFF_F000,
+                    offset=0,
+                    sequence=1,
+                    marker=True,
+                    payload=b"before-wrap",
+                ),
+                ("127.0.0.1", 12345),
+            )
+            await reassembler.handle_datagram(
+                rtp_jpeg_packet(
+                    timestamp=0x0000_1000,
+                    offset=0,
+                    sequence=2,
+                    marker=True,
+                    payload=b"after-wrap",
+                ),
+                ("127.0.0.1", 12345),
+            )
 
         asyncio.run(run())
 
-        self.assertEqual(
-            [message["payload"] for message in manager.messages if message["kind"] == "video"],
-            [b"before-reboot", b"after-reboot"],
-        )
+        video_payloads = [message["payload"] for message in manager.messages if message["kind"] == "video"]
+        self.assertEqual(len(video_payloads), 2)
+        self.assertIn(b"before-wrap", video_payloads[0])
+        self.assertIn(b"after-wrap", video_payloads[1])
+
+    def test_udp_video_reassembler_accepts_timestamp_reset_for_new_ssrc(self) -> None:
+        config = app_config_with_video_auth()
+        manager = FakeBroadcastManager()
+        reassembler = UdpVideoReassembler(manager, config)
+
+        async def send_fragment(ssrc: int, timestamp: int, sequence: int, payload: bytes) -> None:
+            raw = rtp_jpeg_packet(
+                ssrc=ssrc,
+                timestamp=timestamp,
+                offset=0,
+                sequence=sequence,
+                marker=True,
+                payload=payload,
+            )
+            await reassembler.handle_datagram(raw, ("127.0.0.1", 12345))
+
+        async def run() -> None:
+            await send_fragment(100, 90_000, 1, b"before-reboot")
+            await send_fragment(200, 1_000, 1, b"after-reboot")
+            await send_fragment(100, 180_000, 2, b"late-old-session")
+
+        asyncio.run(run())
+
+        video_payloads = [message["payload"] for message in manager.messages if message["kind"] == "video"]
+        self.assertEqual(len(video_payloads), 2)
+        self.assertIn(b"before-reboot", video_payloads[0])
+        self.assertIn(b"after-reboot", video_payloads[1])
 
 
 if __name__ == "__main__":

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field, fields
 from pathlib import Path
+import string
 import tomllib
 from typing import Any
 
@@ -18,6 +19,7 @@ TOP_LEVEL_SECTIONS = {
 AUDIO_MAX_PAYLOAD_BYTES = 64 * 1024
 BYTES_PER_PCM16_SAMPLE = 2
 DEVICE_ID_MAX_BYTES = 128
+VIDEO_AUTH_KEY_HEX_BYTES = 32
 
 
 @dataclass(frozen=True)
@@ -55,6 +57,7 @@ class DeviceTransportConfig:
     video_payload_bytes: int = 1200
     video_reorder_window_ms: int = 120
     video_frame_timeout_ms: int = 180
+    video_auth_key_hex: str = ""
     control: str = "ws"
     audio_up: str = "ws"
     audio_down: str = "ws"
@@ -202,6 +205,21 @@ def _validate_config(config: AppConfig) -> None:
             raise ValueError(f"Config value device.transport.{field_name} must be 'ws' or 'udp'")
     if transport.control != "ws" or transport.audio_up != "ws" or transport.audio_down != "ws":
         raise ValueError("Only device.transport.video supports udp; control/audio transports must be 'ws'")
+    auth_key = transport.video_auth_key_hex
+    key_len = VIDEO_AUTH_KEY_HEX_BYTES * 2
+    hex_digits = set(string.hexdigits)
+    if not isinstance(auth_key, str):
+        raise ValueError("Config value device.transport.video_auth_key_hex must be a string")
+    if auth_key and (len(auth_key) != key_len or any(ch not in hex_digits for ch in auth_key)):
+        raise ValueError(
+            "Config value device.transport.video_auth_key_hex must be "
+            f"{key_len} hex characters when set"
+        )
+    if transport.video == "udp" and not auth_key:
+        raise ValueError(
+            "Config value device.transport.video_auth_key_hex must be set "
+            "when device.transport.video='udp'"
+        )
     audio_chunk_bytes = (
         capture.audio_sample_rate * capture.audio_chunk_ms * BYTES_PER_PCM16_SAMPLE // 1000
     )

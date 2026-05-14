@@ -11,7 +11,6 @@ enum PacketType : uint8_t {
   PKT_SPEECH_PCM16 = 6,
   PKT_PING = 7,
   PKT_PONG = 8,
-  PKT_VIDEO_JPEG_FRAGMENT = 9,
 };
 
 struct __attribute__((packed)) PacketHeader {

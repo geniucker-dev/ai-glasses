@@ -68,8 +68,11 @@ class ConfigTests(unittest.TestCase):
         self.assertIn("#define AGL_FRAME_SIZE FRAMESIZE_SVGA", header)
         self.assertIn("#define AGL_VIDEO_PACKET_CAPACITY 393216", header)
         self.assertIn("#define AGL_CAMERA_PROFILE AGL_CAMERA_PROFILE_TRAFFIC_SIGNAL", header)
+        self.assertIn("#define AGL_FRAME_WIDTH_PIXELS 800", header)
+        self.assertIn("#define AGL_FRAME_HEIGHT_PIXELS 600", header)
         self.assertIn("#define AGL_VIDEO_TRANSPORT_UDP 1", header)
         self.assertIn("#define AGL_VIDEO_UDP_CHUNK_BYTES 1200", header)
+        self.assertIn("#define AGL_VIDEO_AUTH_KEY {0x01, 0x23, 0x45", header)
 
     def test_firmware_header_maps_configured_frame_size(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -178,23 +181,51 @@ class ConfigTests(unittest.TestCase):
         cases = {
             "video_payload_bytes": "200",
             "video_payload_bytes_large": "1401",
+            "video_auth_key_hex_empty_for_udp": '""',
+            "video_auth_key_hex_short": '"abcd"',
+            "video_auth_key_hex_non_hex": '"' + ("0" * 63) + 'z"',
             "video": '"tcp"',
             "control": '"udp"',
             "audio_up": '"udp"',
             "audio_down": '"udp"',
         }
         for field, value in cases.items():
-            field_name = "video_payload_bytes" if field.startswith("video_payload_bytes") else field
+            if field.startswith("video_payload_bytes"):
+                field_name = "video_payload_bytes"
+            elif field.startswith("video_auth_key_hex"):
+                field_name = "video_auth_key_hex"
+            else:
+                field_name = field
             with self.subTest(field=field):
                 with tempfile.TemporaryDirectory() as tmp:
                     config_path = Path(tmp) / "config.toml"
+                    key_line = ""
+                    if not field.startswith("video_auth_key_hex"):
+                        key_line = f'video_auth_key_hex = "{"0" * 64}"\n'
+                    video_line = ""
+                    if field != "video":
+                        video_line = 'video = "udp"\n'
                     config_path.write_text(
-                        f"[device.transport]\n{field_name} = {value}\n",
+                        "[device.transport]\n"
+                        f"{video_line}"
+                        f"{key_line}"
+                        f"{field_name} = {value}\n",
                         encoding="utf-8",
                     )
 
                     with self.assertRaisesRegex(ValueError, r"device\.transport"):
                         load_config(config_path)
+
+    def test_invalid_video_auth_key_is_rejected_for_ws_transport(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = Path(tmp) / "config.toml"
+            config_path.write_text(
+                '[device.transport]\nvideo = "ws"\nvideo_auth_key_hex = "zz"\n',
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(ValueError, r"video_auth_key_hex"):
+                load_config(config_path)
 
     def test_device_id_is_required_and_length_limited(self) -> None:
         cases = {
