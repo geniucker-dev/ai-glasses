@@ -609,6 +609,11 @@ class DeviceConfigTests(unittest.TestCase):
         self.assertGreater(result["fps_p50"], 0)
         self.assertEqual(manager.backend_benchmark, result)
 
+    def test_video_stats_counts_single_recent_frame_in_window(self) -> None:
+        fps = DeviceManager._fps_from_timestamps([9.0], now=10.0, window_s=3.0)
+
+        self.assertAlmostEqual(fps, 1 / 3)
+
     def test_snapshot_includes_vision_frame_size(self) -> None:
         manager = DeviceManager(
             vision=FakeVision(),

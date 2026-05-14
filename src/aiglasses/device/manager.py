@@ -621,8 +621,10 @@ class DeviceManager:
     @staticmethod
     def _fps_from_timestamps(timestamps: list[float], now: float, window_s: float = 3.0) -> float:
         recent = [item for item in timestamps if now - item <= window_s]
-        if len(recent) < 2:
+        if not recent:
             return 0.0
+        if len(recent) == 1:
+            return 1.0 / window_s
         elapsed = recent[-1] - recent[0]
         return (len(recent) - 1) / elapsed if elapsed > 0 else 0.0
 
