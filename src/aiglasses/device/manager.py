@@ -587,6 +587,7 @@ class DeviceManager:
                 "kind": "frame",
                 "frame_count": frame_count,
                 "video_stats": self.video_stats(),
+                "backend_benchmark": self.backend_benchmark,
                 "recording": self.recording_status(),
             }
         )

@@ -260,8 +260,16 @@ function renderVideoStats(stats) {
 }
 
 function renderBackendBenchmark(benchmark) {
-  const maxFps = Number(benchmark?.fps_p50);
-  maxBackendFpsEl.textContent = Number.isFinite(maxFps) ? maxFps.toFixed(1) : "--";
+  const maxFps = Number(benchmark?.fps_p50 ?? benchmark?.fps_mean);
+  if (Number.isFinite(maxFps)) {
+    maxBackendFpsEl.textContent = maxFps.toFixed(1);
+    maxBackendFpsEl.title = "";
+    return;
+  }
+  const status = benchmark?.status;
+  maxBackendFpsEl.textContent =
+    status === "running" || status === "pending" ? "..." : status === "failed" ? "failed" : "--";
+  maxBackendFpsEl.title = benchmark?.error || status || "";
 }
 
 function renderState(snapshot) {
@@ -748,8 +756,10 @@ function connectUi() {
       latestState = mergeState(latestState, {
         frame_count: msg.frame_count,
         video_stats: msg.video_stats,
+        backend_benchmark: msg.backend_benchmark,
       });
       renderVideoStats(msg.video_stats);
+      renderBackendBenchmark(msg.backend_benchmark);
       if (msg.recording) renderRecordingStatus(msg.recording);
     }
     if (msg.kind === "speech") {

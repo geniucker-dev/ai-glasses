@@ -433,6 +433,7 @@ class DeviceConfigTests(unittest.TestCase):
         self.assertEqual(message["frame_count"], 1)
         self.assertIn("received_fps_3s", message["video_stats"])
         self.assertIn("processed_fps_3s", message["video_stats"])
+        self.assertEqual(message["backend_benchmark"], {"status": "pending"})
 
     def test_video_packet_processing_is_serialized(self) -> None:
         vision = BlockingVision()
