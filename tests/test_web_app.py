@@ -47,13 +47,14 @@ class FakeBroadcastManager:
     def mark_video_udp_seen(self) -> None:
         self.video_udp_seen_count += 1
 
-    async def handle_video_packet(self, packet: Packet) -> None:
+    async def handle_video_packet(self, packet: Packet, **kwargs: object) -> None:
         self.messages.append(
             {
                 "kind": "video",
                 "seq": packet.seq,
                 "timestamp_ms": packet.timestamp_ms,
                 "payload": packet.payload,
+                "video_session": kwargs.get("video_session"),
             }
         )
 
@@ -936,6 +937,10 @@ class WebAppTests(unittest.TestCase):
         self.assertEqual(len(video_payloads), 2)
         self.assertIn(b"before-reboot", video_payloads[0])
         self.assertIn(b"after-reboot", video_payloads[1])
+        video_sessions = [
+            message["video_session"] for message in manager.messages if message["kind"] == "video"
+        ]
+        self.assertEqual(video_sessions, [("udp", 100), ("udp", 200)])
 
 
 if __name__ == "__main__":

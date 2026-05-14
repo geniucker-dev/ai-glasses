@@ -8,7 +8,7 @@ from pathlib import Path
 import statistics
 import time
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Hashable
 
 import cv2
 from fastapi import WebSocket
@@ -88,6 +88,7 @@ class DeviceManager:
     speech_seq: int = 0
     started_at: float = field(default_factory=time.time)
     frame_received_at: list[float] = field(default_factory=list)
+    frame_processed_at: list[float] = field(default_factory=list)
     analysis_elapsed_ms: list[float] = field(default_factory=list)
     backend_benchmark: dict[str, Any] = field(
         default_factory=lambda: {"status": "pending"}
@@ -103,6 +104,9 @@ class DeviceManager:
         default_factory=_device_ws_close_tasks
     )
     device_ws_generations: dict[str, int] = field(default_factory=_device_ws_generations)
+    video_processing_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    last_processed_video_session: Hashable | None = None
+    last_processed_video_seq: int | None = None
 
     async def add_ui(self, ws: WebSocket) -> None:
         self.ui_clients.add(ws)
@@ -525,13 +529,32 @@ class DeviceManager:
             return None
         return payload
 
-    async def handle_video_packet(self, packet: Packet) -> None:
+    async def handle_video_packet(
+        self,
+        packet: Packet,
+        *,
+        video_session: Hashable | None = None,
+    ) -> None:
         if packet.packet_type != PacketType.VIDEO_JPEG:
             raise ProtocolError(f"unexpected packet on video channel: {packet.packet_type}")
+        self._record_frame_received()
+        async with self.video_processing_lock:
+            if (
+                self.last_processed_video_session == video_session
+                and
+                self.last_processed_video_seq is not None
+                and not self._packet_seq_newer(packet.seq, self.last_processed_video_seq)
+            ):
+                return
+            await self._process_video_packet(packet)
+            self.last_processed_video_session = video_session
+            self.last_processed_video_seq = packet.seq
+
+    async def _process_video_packet(self, packet: Packet) -> None:
         self.last_frame_jpeg = packet.payload
         self.frame_count += 1
-        self._record_frame_received()
-        if self.frame_count % 2 == 1:
+        frame_count = self.frame_count
+        if frame_count % 2 == 1:
             started = time.perf_counter()
             analysis = await asyncio.to_thread(self.vision.analyze_jpeg, packet.payload)
             self._record_analysis_elapsed((time.perf_counter() - started) * 1000)
@@ -541,7 +564,7 @@ class DeviceManager:
             await self.broadcast(
                 {
                     "kind": "analysis",
-                    "frame_count": self.frame_count,
+                    "frame_count": frame_count,
                     "observation": observation,
                     "navigation": nav.state,
                     "overlay": nav.overlay,
@@ -550,10 +573,11 @@ class DeviceManager:
             if nav.speech:
                 await self.speech.say(nav.speech)
         await self._record_frame(packet.payload)
+        self._record_frame_processed()
         await self.broadcast_bytes(
             Packet(
                 PacketType.VIDEO_JPEG,
-                self.frame_count,
+                frame_count,
                 int(time.time() * 1000),
                 packet.payload,
             ).pack()
@@ -561,7 +585,7 @@ class DeviceManager:
         await self.broadcast(
             {
                 "kind": "frame",
-                "frame_count": self.frame_count,
+                "frame_count": frame_count,
                 "video_stats": self.video_stats(),
                 "recording": self.recording_status(),
             }
@@ -574,17 +598,38 @@ class DeviceManager:
         while self.frame_received_at and self.frame_received_at[0] < cutoff:
             self.frame_received_at.pop(0)
 
+    def _record_frame_processed(self) -> None:
+        now = time.monotonic()
+        self.frame_processed_at.append(now)
+        cutoff = now - 10
+        while self.frame_processed_at and self.frame_processed_at[0] < cutoff:
+            self.frame_processed_at.pop(0)
+
     def _record_analysis_elapsed(self, elapsed_ms: float) -> None:
         self.analysis_elapsed_ms.append(elapsed_ms)
         del self.analysis_elapsed_ms[:-20]
 
+    @staticmethod
+    def _packet_seq_newer(seq: int, previous: int) -> bool:
+        if seq == previous:
+            return False
+        if 0 <= seq <= 0xFFFFFFFF and 0 <= previous <= 0xFFFFFFFF:
+            delta = (seq - previous) & 0xFFFFFFFF
+            return 0 < delta < (1 << 31)
+        return seq > previous
+
+    @staticmethod
+    def _fps_from_timestamps(timestamps: list[float], now: float, window_s: float = 3.0) -> float:
+        recent = [item for item in timestamps if now - item <= window_s]
+        if len(recent) < 2:
+            return 0.0
+        elapsed = recent[-1] - recent[0]
+        return (len(recent) - 1) / elapsed if elapsed > 0 else 0.0
+
     def video_stats(self) -> dict[str, Any]:
         now = time.monotonic()
-        recent = [item for item in self.frame_received_at if now - item <= 3]
-        fps = 0.0
-        if len(recent) >= 2:
-            elapsed = recent[-1] - recent[0]
-            fps = (len(recent) - 1) / elapsed if elapsed > 0 else 0.0
+        received_fps = self._fps_from_timestamps(self.frame_received_at, now)
+        processed_fps = self._fps_from_timestamps(self.frame_processed_at, now)
         analysis_ms = self.analysis_elapsed_ms[-1] if self.analysis_elapsed_ms else None
         avg_analysis_ms = (
             sum(self.analysis_elapsed_ms) / len(self.analysis_elapsed_ms)
@@ -592,7 +637,8 @@ class DeviceManager:
             else None
         )
         return {
-            "received_fps_3s": round(fps, 2),
+            "received_fps_3s": round(received_fps, 2),
+            "processed_fps_3s": round(processed_fps, 2),
             "last_analysis_ms": round(analysis_ms, 1) if analysis_ms is not None else None,
             "avg_analysis_ms": round(avg_analysis_ms, 1) if avg_analysis_ms is not None else None,
         }

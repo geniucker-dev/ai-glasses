@@ -280,7 +280,8 @@ class UdpVideoReassembler:
         if complete_payload is not None:
             self.manager.mark_video_udp_seen()
             await self.manager.handle_video_packet(
-                Packet(PacketType.VIDEO_JPEG, timestamp, int(time.time() * 1000), complete_payload)
+                Packet(PacketType.VIDEO_JPEG, timestamp, int(time.time() * 1000), complete_payload),
+                video_session=("udp", ssrc),
             )
 
     def _assemble_frame(self, fragments: dict[int, bytes], final_len: int) -> bytes | None:
@@ -709,7 +710,7 @@ def create_app(config: AppConfig) -> FastAPI:
                 )
                 if packet is None:
                     continue
-                await manager.handle_video_packet(packet)
+                await manager.handle_video_packet(packet, video_session=("ws", generation))
         except WebSocketDisconnect:
             logger.info("device video websocket disconnected")
         except RuntimeError as exc:

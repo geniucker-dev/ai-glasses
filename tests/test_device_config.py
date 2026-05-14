@@ -2,6 +2,7 @@ import asyncio
 from dataclasses import dataclass
 import json
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -63,6 +64,18 @@ class FakeVision:
 
     def analyze_jpeg(self, payload: bytes) -> FrameAnalysis:
         return FrameAnalysis(model_status={"fake": "ready"})
+
+
+class BlockingVision(FakeVision):
+    def __init__(self) -> None:
+        self.started = threading.Event()
+        self.release = threading.Event()
+
+    def analyze_jpeg(self, payload: bytes) -> FrameAnalysis:
+        self.started.set()
+        if not self.release.wait(timeout=5):
+            raise TimeoutError("test did not release blocked vision analysis")
+        return FrameAnalysis(model_status={"fake": payload.decode("ascii", errors="ignore")})
 
 
 class DeviceConfigTests(unittest.TestCase):
@@ -419,6 +432,103 @@ class DeviceConfigTests(unittest.TestCase):
         self.assertEqual(message["kind"], "frame")
         self.assertEqual(message["frame_count"], 1)
         self.assertIn("received_fps_3s", message["video_stats"])
+        self.assertIn("processed_fps_3s", message["video_stats"])
+
+    def test_video_packet_processing_is_serialized(self) -> None:
+        vision = BlockingVision()
+        manager = DeviceManager(
+            vision=vision,
+            navigation=NavigationStateMachine(),
+            speech=SpeechHub(),
+        )
+        ui_ws = FakeUiWebSocket()
+        manager.ui_clients.add(ui_ws)
+
+        async def run() -> None:
+            first = asyncio.create_task(
+                manager.handle_video_packet(Packet(PacketType.VIDEO_JPEG, 10, 1234, b"first"))
+            )
+            analysis_started = await asyncio.to_thread(vision.started.wait, 2)
+            self.assertTrue(analysis_started)
+
+            second = asyncio.create_task(
+                manager.handle_video_packet(Packet(PacketType.VIDEO_JPEG, 11, 1235, b"second"))
+            )
+            await asyncio.sleep(0.05)
+
+            self.assertEqual(manager.frame_count, 1)
+            self.assertEqual(len(manager.frame_received_at), 2)
+            self.assertEqual(manager.frame_processed_at, [])
+            self.assertEqual(ui_ws.bytes_messages, [])
+            self.assertFalse(second.done())
+
+            vision.release.set()
+            await asyncio.gather(first, second)
+
+        asyncio.run(run())
+
+        frame_packets = [Packet.unpack(message) for message in ui_ws.bytes_messages]
+        self.assertEqual([packet.seq for packet in frame_packets], [1, 2])
+        self.assertEqual([packet.payload for packet in frame_packets], [b"first", b"second"])
+        frame_events = [
+            json.loads(message)["frame_count"]
+            for message in ui_ws.messages
+            if json.loads(message).get("kind") == "frame"
+        ]
+        self.assertEqual(frame_events, [1, 2])
+
+    def test_video_packet_drops_stale_frame_after_newer_processed(self) -> None:
+        manager = DeviceManager(
+            vision=FakeVision(),
+            navigation=NavigationStateMachine(),
+            speech=SpeechHub(),
+        )
+        ui_ws = FakeUiWebSocket()
+        manager.ui_clients.add(ui_ws)
+
+        async def run() -> None:
+            await manager.handle_video_packet(Packet(PacketType.VIDEO_JPEG, 20, 1234, b"newer"))
+            await manager.handle_video_packet(Packet(PacketType.VIDEO_JPEG, 10, 1235, b"older"))
+
+        asyncio.run(run())
+
+        frame_packets = [Packet.unpack(message) for message in ui_ws.bytes_messages]
+        self.assertEqual([packet.seq for packet in frame_packets], [1])
+        self.assertEqual([packet.payload for packet in frame_packets], [b"newer"])
+        self.assertEqual(len(manager.frame_received_at), 2)
+        self.assertEqual(len(manager.frame_processed_at), 1)
+        self.assertEqual(manager.frame_count, 1)
+        self.assertEqual(manager.last_processed_video_seq, 20)
+
+    def test_video_packet_allows_sequence_reset_for_new_session(self) -> None:
+        manager = DeviceManager(
+            vision=FakeVision(),
+            navigation=NavigationStateMachine(),
+            speech=SpeechHub(),
+        )
+        ui_ws = FakeUiWebSocket()
+        manager.ui_clients.add(ui_ws)
+
+        async def run() -> None:
+            await manager.handle_video_packet(
+                Packet(PacketType.VIDEO_JPEG, 20, 1234, b"before-reconnect"),
+                video_session=("ws", 1),
+            )
+            await manager.handle_video_packet(
+                Packet(PacketType.VIDEO_JPEG, 1, 1235, b"after-reconnect"),
+                video_session=("ws", 2),
+            )
+
+        asyncio.run(run())
+
+        frame_packets = [Packet.unpack(message) for message in ui_ws.bytes_messages]
+        self.assertEqual([packet.seq for packet in frame_packets], [1, 2])
+        self.assertEqual(
+            [packet.payload for packet in frame_packets],
+            [b"before-reconnect", b"after-reconnect"],
+        )
+        self.assertEqual(manager.last_processed_video_session, ("ws", 2))
+        self.assertEqual(manager.last_processed_video_seq, 1)
 
     def test_recording_writes_raw_camera_jpeg_and_metadata(self) -> None:
         manager = DeviceManager(

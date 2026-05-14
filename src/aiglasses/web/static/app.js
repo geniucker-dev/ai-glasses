@@ -6,7 +6,8 @@ const overlay = document.querySelector("#overlay");
 const ctx = overlay.getContext("2d");
 const modeEl = document.querySelector("#mode");
 const fpsEl = document.querySelector("#fps");
-const backendFpsEl = document.querySelector("#backendFps");
+const receivedFpsEl = document.querySelector("#receivedFps");
+const processedFpsEl = document.querySelector("#processedFps");
 const maxBackendFpsEl = document.querySelector("#maxBackendFps");
 const uptimeEl = document.querySelector("#uptime");
 const lightEl = document.querySelector("#light");
@@ -251,9 +252,11 @@ function renderTrafficDebug(observation) {
   );
 }
 
-function renderBackendFps(stats) {
-  const backendFps = Number(stats?.received_fps_3s);
-  backendFpsEl.textContent = Number.isFinite(backendFps) ? backendFps.toFixed(1) : "0.0";
+function renderVideoStats(stats) {
+  const receivedFps = Number(stats?.received_fps_3s);
+  const processedFps = Number(stats?.processed_fps_3s);
+  receivedFpsEl.textContent = Number.isFinite(receivedFps) ? receivedFps.toFixed(1) : "0.0";
+  processedFpsEl.textContent = Number.isFinite(processedFps) ? processedFps.toFixed(1) : "0.0";
 }
 
 function renderBackendBenchmark(benchmark) {
@@ -278,7 +281,7 @@ function renderState(snapshot) {
   }
   modeEl.textContent = latestState.navigation?.mode || "idle";
   uptimeEl.textContent = `${latestState.uptime_s || 0}s`;
-  if (hasOwn(incoming, "video_stats")) renderBackendFps(incoming.video_stats);
+  if (hasOwn(incoming, "video_stats")) renderVideoStats(incoming.video_stats);
   if (hasOwn(incoming, "backend_benchmark")) {
     renderBackendBenchmark(incoming.backend_benchmark);
   }
@@ -742,7 +745,7 @@ function connectUi() {
         frame_count: msg.frame_count,
         video_stats: msg.video_stats,
       });
-      renderBackendFps(msg.video_stats);
+      renderVideoStats(msg.video_stats);
       if (msg.recording) renderRecordingStatus(msg.recording);
     }
     if (msg.kind === "speech") {

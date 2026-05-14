@@ -160,7 +160,7 @@ h2 {
   border-bottom: 1px solid var(--line);
 }
 
-.metric:nth-child(3),
+.metric:nth-child(4),
 .metric:last-child {
   border-right: 0;
 }
@@ -170,7 +170,7 @@ h2 {
 }
 
 .metric-primary {
-  grid-column: span 4;
+  grid-column: span 3;
   min-height: 58px;
 }
 
@@ -567,7 +567,7 @@ pre {
   }
 
   .metric-primary {
-    grid-column: span 2;
+    grid-column: span 3;
   }
 
   .metric-secondary {
@@ -628,7 +628,7 @@ pre {
   }
 
   .metric-primary:nth-child(3) {
-    grid-column: 1 / -1;
+    grid-column: span 3;
   }
 
   .metric-secondary {
@@ -641,7 +641,7 @@ pre {
     border-right: 0;
   }
 
-  .metric:nth-child(3) {
+  .metric:nth-child(4) {
     border-right: 0;
   }
 
