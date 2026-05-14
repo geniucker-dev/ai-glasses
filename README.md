@@ -6,7 +6,7 @@
 
 - Seeed XIAO ESP32S3 Sense 固件，使用 PlatformIO。
 - Python 后端使用 `uv` 管理。
-- ESP32 通过 WebSocket 上传 JPEG 视频、PCM16 音频、ICM42688 IMU。
+- ESP32 通过 RTP/JPEG UDP 上传视频，通过 WebSocket 上传 PCM16 音频、ICM42688 IMU 和控制消息。
 - 后端使用 PyTorch/Ultralytics 模型做盲道/斑马线、障碍物、红绿灯推理。
 - Web 调试台显示实时画面、检测状态、IMU、ASR/指令和“应播报内容”。
 - TTS 支持 UI 文字播报和设备音频下行，可选择 DashScope API 或本地 TTS。
@@ -29,6 +29,10 @@ cp config.example.toml config.toml
   - `device.capture.video_fps`、`jpeg_quality`：视频上传帧率和 JPEG 质量
   - `device.capture.camera_profile`：固件相机调参配置，默认 `traffic_signal` 会压曝光和增益以保留红绿灯边缘
   - `device.capture.audio_sample_rate`、`audio_chunk_ms`：设备上行 PCM16 音频参数；启用 ASR 时 `asr.sample_rate` 必须和设备采样率一致，且单个音频包不能超过后端 64 KiB 限制
+- 设备传输参数：
+  - `device.transport.video = "udp"`：默认使用 RTP/JPEG over UDP 上传视频；控制、音频上行和音频下行仍使用 WebSocket
+  - `device.transport.video_payload_bytes`：单个 UDP RTP/JPEG 包内的扫描数据预算，默认 `1200`
+  - `device.transport.video_auth_key_hex`：UDP 视频 HMAC-SHA256 鉴权密钥，必须是 32 字节/64 个十六进制字符；不要使用示例配置里的公开密钥
 - DashScope ASR 配置：
   - `asr.dashscope_api_key`：DashScope API Key
   - `asr.websocket_base_url`：实时 ASR WebSocket 地址
@@ -39,6 +43,16 @@ cp config.example.toml config.toml
   - `speech.mode = "device"`：同时把 TTS PCM16 下发到设备，需开启 `device.audio_down.enabled`
   - `speech.provider = "dashscope"`：使用 DashScope API
   - `speech.provider = "local"`：使用 Piper 本地 TTS，支持中英文 voice 自动切换
+
+首次创建本地配置后，为 UDP 视频生成部署密钥：
+
+```bash
+openssl rand -hex 32
+```
+
+把输出写入 `config.toml` 的 `device.transport.video_auth_key_hex`。后端会校验每个 UDP
+RTP/JPEG 包里的认证扩展，固件构建时同一个密钥会写入 `firmware/include/generated_config.h`。
+修改这个密钥后必须重新生成固件头并重新烧录设备。
 
 ## TTS 与设备播报
 
@@ -178,7 +192,24 @@ uv run pio remote device monitor -b 115200
 
 上传/构建前先运行 `aiglasses.config.firmware_header`，它会从 `config.toml` 生成 ignored 的 `firmware/include/generated_config.h`。如果本地上传误识别到 `/dev/ttyS*` 或遇到串口权限问题，可用 `uv run pio remote device list` 找到带 USB VID/PID 的 ESP32 端口，再用 `--upload-port` 指定。
 
-如果修改了 WiFi、服务器地址或采集参数，必须重新生成 `generated_config.h` 后再编译/上传固件。
+如果修改了 WiFi、服务器地址、采集参数或 `device.transport.video_auth_key_hex`，必须重新生成
+`generated_config.h` 后再编译/上传固件。
+
+## 视频传输
+
+默认视频链路是 RTP/JPEG over UDP：
+
+- 固件从摄像头 JPEG 中提取扫描数据和 8-bit 量化表，按 RFC 2435 的 RTP/JPEG payload
+  type 26 打包发送。
+- 每个 RTP 包带一个项目自定义 RTP header extension，包含 `AGLA` magic 和截断到 16
+  字节的 HMAC-SHA256 tag。
+- 后端只接受通过 `device.transport.video_auth_key_hex` 验证的 RTP/JPEG 包，并在重组后
+  重建标准 JPEG 再进入现有视觉流水线。
+- 当前实现面向 ESP32 camera 输出的 baseline JPEG：支持 RTP/JPEG type 0/1、动态 8-bit
+  量化表和标准 Huffman 表；控制、音频和其他设备消息仍走 WebSocket `AGL1` 包协议。
+
+UDP 端口不应暴露到不可信网络。HMAC 可以阻止没有密钥的同网段注入，但密钥仍来自本地配置和
+固件生成头文件，泄露后需要重新生成、重新部署并重新烧录。
 
 ## 模型
 
@@ -279,6 +310,12 @@ effective_serial_fps_p50=21.43
 
 ```bash
 uv run python -m unittest discover -s tests
+```
+
+快速跑配置和 Web/UDP 视频相关测试：
+
+```bash
+uv run python -m unittest tests.test_config tests.test_web_app
 ```
 
 Lint：

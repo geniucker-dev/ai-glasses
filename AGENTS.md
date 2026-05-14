@@ -22,6 +22,7 @@ This repository contains a Python backend and ESP32 firmware for AI glasses.
 - `uv run pio run -d firmware`: Build ESP32 firmware.
 - `uv run pio run -d firmware -t upload`: Upload ESP32 firmware through a locally connected serial port.
 - If local upload cannot access the ESP32 serial port, use PlatformIO Remote instead: first run `uv run pio remote device list`, pick the ESP32 USB/JTAG port (for example `/dev/ttyACM0`), then run `uv run pio remote run -d firmware -t upload --upload-port <port>`.
+- `uv run python -m unittest tests.test_config tests.test_web_app`: Run focused config and web/UDP video tests.
 - `uv run python -m unittest discover -s tests`: Run unit tests.
 - `uv run ruff check .`: Run Python lint checks.
 
@@ -51,6 +52,8 @@ Pull requests should include a concise description, affected areas, verification
 
 ## Security & Configuration Tips
 
-Keep `config.toml` local; it may contain WiFi credentials and API keys. Start from `config.example.toml`, regenerate firmware headers after config changes, and avoid logging secrets in backend or firmware output.
+Keep `config.toml` local; it may contain WiFi credentials, API keys, and the UDP video auth key. Start from `config.example.toml`, generate a deployment `device.transport.video_auth_key_hex` with `openssl rand -hex 32`, regenerate firmware headers after config changes, and avoid logging secrets in backend or firmware output.
+
+The default video transport is authenticated RTP/JPEG over UDP. Do not expose the UDP video port to untrusted networks. If `device.transport.video_auth_key_hex` changes or leaks, regenerate `firmware/include/generated_config.h` and re-upload firmware so the backend and ESP32 share the same key.
 
 During early-stage development, do not preserve backward compatibility for renamed or removed configuration fields. Update `config.example.toml`, documentation, code, and tests to the current schema instead of adding compatibility aliases or migration logic.
