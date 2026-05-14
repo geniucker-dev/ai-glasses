@@ -59,6 +59,26 @@ class TorchYoloTests(unittest.TestCase):
         np.testing.assert_array_equal(raw0, pred)
         np.testing.assert_array_equal(raw1, proto)
 
+    def test_letterbox_pads_without_stretching_source_frame(self) -> None:
+        model = object.__new__(TorchYoloModel)
+        model.width = 8
+        model.height = 8
+        frame = np.full((6, 8, 3), 7, dtype=np.uint8)
+
+        image, transform = TorchYoloModel._letterbox(model, frame)
+
+        self.assertEqual(image.shape, (8, 8, 3))
+        self.assertEqual(transform.source_width, 8)
+        self.assertEqual(transform.source_height, 6)
+        self.assertEqual(transform.scale, 1.0)
+        self.assertEqual(transform.pad_top, 1)
+        self.assertEqual(transform.pad_left, 0)
+        self.assertEqual(transform.content_width, 8)
+        self.assertEqual(transform.content_height, 6)
+        np.testing.assert_array_equal(image[1:7], frame)
+        self.assertTrue(np.all(image[0] == 114))
+        self.assertTrue(np.all(image[7] == 114))
+
     def test_configure_class_names_overlays_selected_class_ids(self) -> None:
         model = object.__new__(TorchYoloModel)
         model._model = FakeYolo()

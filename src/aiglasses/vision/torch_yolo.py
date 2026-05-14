@@ -5,7 +5,15 @@ from pathlib import Path
 import cv2
 import numpy as np
 
-from .yolo_postprocess import ModelUnavailable, YoloOutput, postprocess_yolo_outputs
+from .yolo_postprocess import (
+    LetterboxTransform,
+    ModelUnavailable,
+    YoloOutput,
+    postprocess_yolo_outputs,
+)
+
+
+LETTERBOX_PAD_VALUE = 114
 
 
 class TorchYoloModel:
@@ -103,8 +111,8 @@ class TorchYoloModel:
         if self._model is None:
             self.load()
 
-        resized = cv2.resize(bgr, (self.width, self.height), interpolation=cv2.INTER_LINEAR)
-        rgb = cv2.cvtColor(resized, cv2.COLOR_BGR2RGB).astype(np.float32) / 255.0
+        image, letterbox = self._letterbox(bgr)
+        rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB).astype(np.float32) / 255.0
         chw = np.transpose(rgb, (2, 0, 1))[None].copy()
         tensor = self._torch.from_numpy(chw).to(self.torch_device)
         if self.torch_half and self.torch_device != "cpu":
@@ -124,6 +132,50 @@ class TorchYoloModel:
             height=self.height,
             confidence=self.confidence,
             min_mask_area=self.min_mask_area,
+            letterbox=letterbox,
+        )
+
+    def _letterbox(self, bgr: np.ndarray) -> tuple[np.ndarray, LetterboxTransform]:
+        source_height, source_width = bgr.shape[:2]
+        scale = min(self.width / source_width, self.height / source_height)
+        content_width = min(self.width, max(1, int(round(source_width * scale))))
+        content_height = min(self.height, max(1, int(round(source_height * scale))))
+        if (content_width, content_height) == (source_width, source_height):
+            resized = bgr
+        else:
+            resized = cv2.resize(
+                bgr,
+                (content_width, content_height),
+                interpolation=cv2.INTER_LINEAR,
+            )
+
+        pad_width = max(0, self.width - content_width)
+        pad_height = max(0, self.height - content_height)
+        pad_left = pad_width // 2
+        pad_right = pad_width - pad_left
+        pad_top = pad_height // 2
+        pad_bottom = pad_height - pad_top
+        if pad_width or pad_height:
+            image = cv2.copyMakeBorder(
+                resized,
+                pad_top,
+                pad_bottom,
+                pad_left,
+                pad_right,
+                cv2.BORDER_CONSTANT,
+                value=(LETTERBOX_PAD_VALUE, LETTERBOX_PAD_VALUE, LETTERBOX_PAD_VALUE),
+            )
+        else:
+            image = resized
+
+        return image, LetterboxTransform(
+            source_width=source_width,
+            source_height=source_height,
+            scale=scale,
+            pad_left=pad_left,
+            pad_top=pad_top,
+            content_width=content_width,
+            content_height=content_height,
         )
 
     def _to_raw_outputs(self, output) -> tuple[np.ndarray, np.ndarray | None]:

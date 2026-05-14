@@ -90,6 +90,14 @@ class VisionPipelineTrafficLightTests(unittest.TestCase):
         self.assertEqual(analysis.traffic_light_confidence, 0.0)
         self.assertIsNone(analysis.traffic_light_detection)
 
+    def test_analysis_reports_source_frame_dimensions(self) -> None:
+        pipeline = self._pipeline_with_traffic([])
+
+        analysis = pipeline.analyze_frame(np.zeros((6, 8, 3), dtype=np.uint8))
+
+        self.assertEqual(analysis.frame_width, 8)
+        self.assertEqual(analysis.frame_height, 6)
+
     def test_center_weight_uses_frame_size_for_pixel_boxes(self) -> None:
         tuning = VisionTuning(
             traffic_go_min_conf=0.0,

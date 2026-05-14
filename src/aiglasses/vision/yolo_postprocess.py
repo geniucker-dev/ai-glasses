@@ -22,6 +22,17 @@ class YoloOutput:
     top_confidence: float = 0.0
 
 
+@dataclass(frozen=True)
+class LetterboxTransform:
+    source_width: int
+    source_height: int
+    scale: float
+    pad_left: int
+    pad_top: int
+    content_width: int
+    content_height: int
+
+
 def _nms(boxes: np.ndarray, scores: np.ndarray, iou_threshold: float = 0.45) -> list[int]:
     if boxes.size == 0:
         return []
@@ -43,6 +54,60 @@ def _nms(boxes: np.ndarray, scores: np.ndarray, iou_threshold: float = 0.45) -> 
         iou = inter / np.maximum(union, 1e-6)
         order = order[1:][iou <= iou_threshold]
     return keep
+
+
+def _output_size(
+    width: int,
+    height: int,
+    letterbox: LetterboxTransform | None,
+) -> tuple[int, int]:
+    if letterbox is None:
+        return width, height
+    return letterbox.source_width, letterbox.source_height
+
+
+def _map_boxes_to_output(
+    boxes: np.ndarray,
+    *,
+    width: int,
+    height: int,
+    letterbox: LetterboxTransform | None,
+) -> np.ndarray:
+    mapped = boxes.astype(np.float32, copy=True)
+    if letterbox is not None:
+        scale = max(letterbox.scale, 1e-6)
+        mapped[:, [0, 2]] = (mapped[:, [0, 2]] - letterbox.pad_left) / scale
+        mapped[:, [1, 3]] = (mapped[:, [1, 3]] - letterbox.pad_top) / scale
+        out_w, out_h = letterbox.source_width, letterbox.source_height
+    else:
+        out_w, out_h = width, height
+    mapped[:, [0, 2]] = np.clip(mapped[:, [0, 2]], 0, out_w)
+    mapped[:, [1, 3]] = np.clip(mapped[:, [1, 3]], 0, out_h)
+    return mapped
+
+
+def _map_mask_to_output(
+    mask: np.ndarray,
+    *,
+    width: int,
+    height: int,
+    letterbox: LetterboxTransform | None,
+) -> np.ndarray:
+    mask = cv2.resize(mask, (width, height), interpolation=cv2.INTER_LINEAR)
+    if letterbox is None:
+        return mask
+    x1 = letterbox.pad_left
+    y1 = letterbox.pad_top
+    x2 = x1 + letterbox.content_width
+    y2 = y1 + letterbox.content_height
+    content = mask[y1:y2, x1:x2]
+    if content.shape[:2] == (letterbox.source_height, letterbox.source_width):
+        return content
+    return cv2.resize(
+        content,
+        (letterbox.source_width, letterbox.source_height),
+        interpolation=cv2.INTER_LINEAR,
+    )
 
 
 def _summarize_mask(
@@ -102,6 +167,7 @@ def postprocess_yolo_outputs(
     height: int,
     confidence: float,
     min_mask_area: float,
+    letterbox: LetterboxTransform | None = None,
 ) -> YoloOutput:
     pred = np.squeeze(raw0)
     if pred.ndim != 2:
@@ -143,8 +209,15 @@ def postprocess_yolo_outputs(
     boxes[:, 1] = xywh[:, 1] - xywh[:, 3] / 2
     boxes[:, 2] = xywh[:, 0] + xywh[:, 2] / 2
     boxes[:, 3] = xywh[:, 1] + xywh[:, 3] / 2
-    boxes[:, [0, 2]] = np.clip(boxes[:, [0, 2]], 0, width)
-    boxes[:, [1, 3]] = np.clip(boxes[:, [1, 3]], 0, height)
+    boxes = _map_boxes_to_output(boxes, width=width, height=height, letterbox=letterbox)
+    out_w, out_h = _output_size(width, height, letterbox)
+    valid_boxes = (boxes[:, 2] > boxes[:, 0]) & (boxes[:, 3] > boxes[:, 1])
+    if not valid_boxes.any():
+        return YoloOutput([], {})
+    pred = pred[valid_boxes]
+    scores = scores[valid_boxes]
+    class_ids = class_ids[valid_boxes]
+    boxes = boxes[valid_boxes]
 
     final_idx: list[int] = []
     for class_id in sorted(set(class_ids.tolist())):
@@ -156,7 +229,7 @@ def postprocess_yolo_outputs(
     for i in final_idx:
         label = names.get(int(class_ids[i]), str(int(class_ids[i])))
         x1, y1, x2, y2 = (float(v) for v in boxes[i])
-        area_ratio = max(0.0, (x2 - x1) * (y2 - y1) / max(width * height, 1))
+        area_ratio = max(0.0, (x2 - x1) * (y2 - y1) / max(out_w * out_h, 1))
         detections.append(Detection(label, float(scores[i]), (x1, y1, x2, y2), area_ratio))
 
     if has_masks:
@@ -167,7 +240,12 @@ def postprocess_yolo_outputs(
                     label = names.get(int(class_ids[i]), str(int(class_ids[i])))
                     mask = np.tensordot(coeffs[i], proto, axes=(0, 0))
                     mask = 1.0 / (1.0 + np.exp(-mask))
-                    mask = cv2.resize(mask, (width, height))
+                    mask = _map_mask_to_output(
+                        mask,
+                        width=width,
+                        height=height,
+                        letterbox=letterbox,
+                    )
                     summary = _summarize_mask(
                         label,
                         (mask > 0.5).astype(np.uint8),

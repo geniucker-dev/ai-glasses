@@ -70,6 +70,7 @@ class VisionPipeline:
         return self.analyze_frame(frame)
 
     def analyze_frame(self, frame: np.ndarray) -> FrameAnalysis:
+        frame_height, frame_width = frame.shape[:2]
         status = dict(self.model_status)
         if not hasattr(self, "tuning"):
             self.tuning = default_vision_tuning(self.config.vision_thresholds.traffic_light_conf)
@@ -113,8 +114,8 @@ class VisionPipeline:
                 traffic_detection, traffic_debug = select_traffic_signal(
                     result.detections,
                     self.tuning,
-                    width=self.config.models.image_width,
-                    height=self.config.models.image_height,
+                    width=frame_width,
+                    height=frame_height,
                 )
                 if traffic_detection:
                     traffic_light = traffic_detection.label
@@ -135,8 +136,8 @@ class VisionPipeline:
             traffic_light_candidates=traffic_candidates,
             traffic_light_debug=traffic_debug,
             model_status=status,
-            frame_width=self.config.models.image_width,
-            frame_height=self.config.models.image_height,
+            frame_width=frame_width,
+            frame_height=frame_height,
         )
         self.model_status = status
         return analysis

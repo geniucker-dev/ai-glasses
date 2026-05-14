@@ -404,10 +404,14 @@ function drawTrafficRoi(rect) {
 
 function currentVisionFrameSize() {
   const width = Number(
-    latestState.vision?.image_width || latestState.backend_benchmark?.image_width
+    latestObservation?.frame_width ||
+      latestState.vision?.image_width ||
+      latestState.backend_benchmark?.image_width
   );
   const height = Number(
-    latestState.vision?.image_height || latestState.backend_benchmark?.image_height
+    latestObservation?.frame_height ||
+      latestState.vision?.image_height ||
+      latestState.backend_benchmark?.image_height
   );
   if (Number.isFinite(width) && width > 0 && Number.isFinite(height) && height > 0) {
     return { width, height };
