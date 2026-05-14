@@ -86,6 +86,30 @@ def _map_boxes_to_output(
     return mapped
 
 
+def _crop_mask_to_box(
+    mask: np.ndarray,
+    box: np.ndarray,
+    *,
+    width: int,
+    height: int,
+) -> np.ndarray:
+    h, w = mask.shape[:2]
+    x_scale = w / max(width, 1)
+    y_scale = h / max(height, 1)
+    x1 = int(round(float(box[0]) * x_scale))
+    y1 = int(round(float(box[1]) * y_scale))
+    x2 = int(round(float(box[2]) * x_scale))
+    y2 = int(round(float(box[3]) * y_scale))
+    x1 = max(0, min(w, x1))
+    x2 = max(0, min(w, x2))
+    y1 = max(0, min(h, y1))
+    y2 = max(0, min(h, y2))
+    cropped = np.zeros_like(mask)
+    if x2 > x1 and y2 > y1:
+        cropped[y1:y2, x1:x2] = mask[y1:y2, x1:x2]
+    return cropped
+
+
 def _map_mask_to_output(
     mask: np.ndarray,
     *,
@@ -204,12 +228,14 @@ def postprocess_yolo_outputs(
     scores = scores[keep]
     class_ids = class_ids[keep]
     xywh = pred[:, :4]
-    boxes = np.empty_like(xywh)
-    boxes[:, 0] = xywh[:, 0] - xywh[:, 2] / 2
-    boxes[:, 1] = xywh[:, 1] - xywh[:, 3] / 2
-    boxes[:, 2] = xywh[:, 0] + xywh[:, 2] / 2
-    boxes[:, 3] = xywh[:, 1] + xywh[:, 3] / 2
-    boxes = _map_boxes_to_output(boxes, width=width, height=height, letterbox=letterbox)
+    input_boxes = np.empty_like(xywh)
+    input_boxes[:, 0] = xywh[:, 0] - xywh[:, 2] / 2
+    input_boxes[:, 1] = xywh[:, 1] - xywh[:, 3] / 2
+    input_boxes[:, 2] = xywh[:, 0] + xywh[:, 2] / 2
+    input_boxes[:, 3] = xywh[:, 1] + xywh[:, 3] / 2
+    input_boxes[:, [0, 2]] = np.clip(input_boxes[:, [0, 2]], 0, width)
+    input_boxes[:, [1, 3]] = np.clip(input_boxes[:, [1, 3]], 0, height)
+    boxes = _map_boxes_to_output(input_boxes, width=width, height=height, letterbox=letterbox)
     out_w, out_h = _output_size(width, height, letterbox)
     valid_boxes = (boxes[:, 2] > boxes[:, 0]) & (boxes[:, 3] > boxes[:, 1])
     if not valid_boxes.any():
@@ -218,6 +244,7 @@ def postprocess_yolo_outputs(
     scores = scores[valid_boxes]
     class_ids = class_ids[valid_boxes]
     boxes = boxes[valid_boxes]
+    input_boxes = input_boxes[valid_boxes]
 
     final_idx: list[int] = []
     for class_id in sorted(set(class_ids.tolist())):
@@ -239,7 +266,7 @@ def postprocess_yolo_outputs(
                 for i in final_idx:
                     label = names.get(int(class_ids[i]), str(int(class_ids[i])))
                     mask = np.tensordot(coeffs[i], proto, axes=(0, 0))
-                    mask = 1.0 / (1.0 + np.exp(-mask))
+                    mask = _crop_mask_to_box(mask, input_boxes[i], width=width, height=height)
                     mask = _map_mask_to_output(
                         mask,
                         width=width,
@@ -248,7 +275,7 @@ def postprocess_yolo_outputs(
                     )
                     summary = _summarize_mask(
                         label,
-                        (mask > 0.5).astype(np.uint8),
+                        (mask > 0.0).astype(np.uint8),
                         min_mask_area,
                         float(scores[i]),
                     )

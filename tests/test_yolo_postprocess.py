@@ -93,6 +93,28 @@ class YoloPostprocessTests(unittest.TestCase):
         self.assertEqual(len(result.detections), 1)
         self.assertNotIn("blind_path", result.masks)
 
+    def test_mask_is_cropped_to_detection_box_before_summary(self) -> None:
+        pred = np.zeros((7, 10), dtype=np.float32)
+        pred[:4, 0] = np.array([4.0, 4.0, 4.0, 4.0], dtype=np.float32)
+        pred[4, 0] = 0.90
+        pred[5, 0] = 1.0
+        proto = np.zeros((2, 8, 8), dtype=np.float32)
+        proto[0] = 1.0
+
+        result = postprocess_yolo_outputs(
+            pred,
+            proto,
+            names={0: "blind_path"},
+            num_classes=1,
+            width=8,
+            height=8,
+            confidence=0.35,
+            min_mask_area=0.0,
+        )
+
+        self.assertIn("blind_path", result.masks)
+        self.assertAlmostEqual(result.masks["blind_path"].area_ratio, 0.25)
+
     def test_letterbox_drops_boxes_that_only_hit_padding(self) -> None:
         pred = np.zeros((5, 10), dtype=np.float32)
         pred[:4, 0] = np.array([4.0, 0.5, 4.0, 1.0], dtype=np.float32)
