@@ -1,6 +1,6 @@
 # AI Glasses
 
-重写版智能导航眼镜项目。新代码不沿用旧项目架构或协议，只保留已焊接硬件引脚和顶层能力。
+智能导航眼镜项目，包含 ESP32 固件、Python 后端和 Web 调试台。
 
 ## 功能
 
@@ -241,8 +241,9 @@ uv run python -m aiglasses.vision.export_yoloe_obstacle \
 blind_path = "models/yolo-seg.pt"
 obstacle = "models/yoloe-11l-seg-obstacle.pt"
 traffic_light = "models/trafficlight.pt"
-image_width = 640
-image_height = 480
+# Model input size. SVGA camera frames are 800x600; height is padded to 608 for YOLO.
+image_width = 800
+image_height = 608
 torch_device = "cuda:0"
 torch_half = true
 ```

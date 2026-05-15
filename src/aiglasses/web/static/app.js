@@ -57,7 +57,7 @@ const displayFpsWindowMs = 3000;
 const maxTargetFps = 1000;
 const packetHeaderBytes = 32;
 const packetTypeVideoJpeg = 2;
-const defaultVisionFrame = { width: 640, height: 480 };
+const defaultVisionFrame = { width: 800, height: 608 };
 const tuningFields = {
   traffic_filter_enabled: { element: document.querySelector("#trafficFilterEnabled"), type: "boolean" },
   traffic_light_conf: { element: document.querySelector("#trafficLightConf"), type: "number" },

@@ -77,8 +77,8 @@ class ModelsConfig:
     blind_path: str = "models/yolo-seg.pt"
     obstacle: str = "models/yoloe-11l-seg-obstacle.pt"
     traffic_light: str = "models/trafficlight.pt"
-    image_width: int = 640
-    image_height: int = 480
+    image_width: int = 800
+    image_height: int = 608
     torch_device: str = "cuda:0"
     torch_half: bool = True
 
