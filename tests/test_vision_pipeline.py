@@ -8,23 +8,19 @@ import numpy as np
 from aiglasses.config import AppConfig
 from aiglasses.vision.pipeline import VisionPipeline
 from aiglasses.vision.tuning import VisionTuning, select_traffic_signal
-from aiglasses.vision.types import Detection, MaskSummary
+from aiglasses.vision.types import Detection
 from aiglasses.vision.yolo_postprocess import YoloOutput
-
-
-@dataclass
-class FakeBlindModel:
-    masks: dict[str, MaskSummary]
-    status: str = "ready"
-
-    def predict(self, frame: np.ndarray) -> YoloOutput:
-        return YoloOutput(detections=[], masks=self.masks)
 
 
 @dataclass
 class FakeTrafficModel:
     detections: list[Detection]
     status: str = "ready"
+    confidence: float = 0.0
+    confidence_by_label: dict[str, float] | None = None
+
+    def __post_init__(self) -> None:
+        self.confidence_by_label = dict(self.confidence_by_label or {})
 
     def predict(self, frame: np.ndarray) -> YoloOutput:
         return YoloOutput(detections=self.detections, masks={})
@@ -89,6 +85,8 @@ class VisionPipelineTrafficLightTests(unittest.TestCase):
         self.assertIsNone(analysis.traffic_light)
         self.assertEqual(analysis.traffic_light_confidence, 0.0)
         self.assertIsNone(analysis.traffic_light_detection)
+        self.assertIsNotNone(analysis.crosswalk_detection)
+        self.assertEqual(analysis.crosswalk_detection.label, "crossing")
 
     def test_analysis_reports_source_frame_dimensions(self) -> None:
         pipeline = self._pipeline_with_traffic([])
@@ -112,60 +110,52 @@ class VisionPipelineTrafficLightTests(unittest.TestCase):
         self.assertIsNotNone(selected)
         self.assertEqual(selected.box, center.box)
 
-    def test_crosswalk_segmentation_confidence_filters_false_positive_mask(self) -> None:
-        pipeline = object.__new__(VisionPipeline)
-        pipeline.config = AppConfig(path="config.toml")
-        pipeline.model_status = {}
-        pipeline.blind_model = FakeBlindModel(
-            {
-                "blind_path": MaskSummary(
-                    "blind_path",
-                    area_ratio=0.08,
-                    center_offset=0.0,
-                    vertical_position=0.70,
-                    confidence=0.92,
-                ),
-                "crossing": MaskSummary(
-                    "crossing",
-                    area_ratio=0.06,
-                    center_offset=0.0,
-                    vertical_position=0.60,
-                    confidence=0.40,
-                ),
-            }
+    def test_crosswalk_detection_uses_traffic_model_crossing_box(self) -> None:
+        pipeline = self._pipeline_with_traffic(
+            [
+                Detection("crossing", 0.82, (100.0, 120.0, 500.0, 320.0), 0.21),
+                Detection("crossing", 0.92, (10.0, 10.0, 30.0, 40.0), 0.01),
+            ]
         )
-        pipeline.obstacle_model = None
-        pipeline.traffic_model = None
-        pipeline.tuning = VisionTuning(crosswalk_conf=0.65)
+        pipeline.tuning.crosswalk_detection_conf = 0.50
 
-        analysis = pipeline.analyze_frame(np.zeros((8, 8, 3), dtype=np.uint8))
+        analysis = pipeline.analyze_frame(np.zeros((480, 640, 3), dtype=np.uint8))
 
-        self.assertIsNotNone(analysis.blind_path)
-        self.assertIsNone(analysis.crosswalk)
+        self.assertIsNotNone(analysis.crosswalk_detection)
+        self.assertEqual(analysis.crosswalk_detection.box, (100.0, 120.0, 500.0, 320.0))
 
-    def test_crosswalk_segmentation_confidence_keeps_strong_mask(self) -> None:
-        pipeline = object.__new__(VisionPipeline)
-        pipeline.config = AppConfig(path="config.toml")
-        pipeline.model_status = {}
-        pipeline.blind_model = FakeBlindModel(
-            {
-                "crossing": MaskSummary(
-                    "crossing",
-                    area_ratio=0.06,
-                    center_offset=0.0,
-                    vertical_position=0.60,
-                    confidence=0.86,
-                )
-            }
+    def test_crosswalk_detection_ignores_tiny_box(self) -> None:
+        pipeline = self._pipeline_with_traffic(
+            [Detection("crossing", 0.92, (310.0, 440.0, 330.0, 460.0), 0.90)]
         )
-        pipeline.obstacle_model = None
-        pipeline.traffic_model = None
-        pipeline.tuning = VisionTuning(crosswalk_conf=0.65)
+        pipeline.tuning.crosswalk_detection_conf = 0.50
+        pipeline.tuning.crosswalk_detection_min_area_ratio = 0.005
 
-        analysis = pipeline.analyze_frame(np.zeros((8, 8, 3), dtype=np.uint8))
+        analysis = pipeline.analyze_frame(np.zeros((480, 640, 3), dtype=np.uint8))
 
-        self.assertIsNotNone(analysis.crosswalk)
-        self.assertEqual(analysis.crosswalk.confidence, 0.86)
+        self.assertIsNone(analysis.crosswalk_detection)
+
+    def test_traffic_model_uses_separate_crosswalk_detection_threshold(self) -> None:
+        pipeline = self._pipeline_with_traffic([])
+        pipeline.tuning.traffic_light_conf = 0.20
+        pipeline.tuning.crosswalk_detection_conf = 0.08
+
+        pipeline.analyze_frame(np.zeros((8, 8, 3), dtype=np.uint8))
+
+        self.assertEqual(pipeline.traffic_model.confidence, 0.20)
+        self.assertEqual(pipeline.traffic_model.confidence_by_label, {"crossing": 0.08})
+
+    def test_traffic_model_preserves_existing_label_thresholds(self) -> None:
+        pipeline = self._pipeline_with_traffic([])
+        pipeline.traffic_model.confidence_by_label = {"blank": 0.70}
+        pipeline.tuning.crosswalk_detection_conf = 0.08
+
+        pipeline.analyze_frame(np.zeros((8, 8, 3), dtype=np.uint8))
+
+        self.assertEqual(
+            pipeline.traffic_model.confidence_by_label,
+            {"blank": 0.70, "crossing": 0.08},
+        )
 
 
 if __name__ == "__main__":

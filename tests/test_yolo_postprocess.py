@@ -142,6 +142,149 @@ class YoloPostprocessTests(unittest.TestCase):
 
         self.assertEqual(result.detections, [])
 
+    def test_confidence_by_label_overrides_default_threshold(self) -> None:
+        pred = np.zeros((6, 10), dtype=np.float32)
+        pred[:4, 0] = np.array([2.0, 2.0, 2.0, 2.0], dtype=np.float32)
+        pred[4, 0] = 0.30
+        pred[:4, 1] = np.array([6.0, 6.0, 2.0, 2.0], dtype=np.float32)
+        pred[5, 1] = 0.30
+
+        result = postprocess_yolo_outputs(
+            pred,
+            None,
+            names={0: "go", 1: "crossing"},
+            num_classes=2,
+            width=8,
+            height=8,
+            confidence=0.50,
+            confidence_by_label={"crossing": 0.20},
+            min_mask_area=0.0,
+        )
+
+        self.assertEqual([item.label for item in result.detections], ["crossing"])
+
+    def test_confidence_by_label_blocks_argmax_below_override_threshold(self) -> None:
+        pred = np.zeros((6, 10), dtype=np.float32)
+        pred[:4, 0] = np.array([4.0, 4.0, 2.0, 2.0], dtype=np.float32)
+        pred[5, 0] = 0.30
+
+        result = postprocess_yolo_outputs(
+            pred,
+            None,
+            names={0: "go", 1: "crossing"},
+            num_classes=2,
+            width=8,
+            height=8,
+            confidence=0.20,
+            confidence_by_label={"crossing": 0.80},
+            min_mask_area=0.0,
+        )
+
+        self.assertEqual(result.detections, [])
+
+    def test_confidence_by_label_does_not_duplicate_kept_argmax_row(self) -> None:
+        pred = np.zeros((6, 10), dtype=np.float32)
+        pred[:4, 0] = np.array([4.0, 4.0, 2.0, 2.0], dtype=np.float32)
+        pred[4, 0] = 0.90
+        pred[5, 0] = 0.25
+
+        result = postprocess_yolo_outputs(
+            pred,
+            None,
+            names={0: "go", 1: "crossing"},
+            num_classes=2,
+            width=8,
+            height=8,
+            confidence=0.20,
+            confidence_by_label={"crossing": 0.20},
+            min_mask_area=0.0,
+        )
+
+        self.assertEqual([item.label for item in result.detections], ["go"])
+
+    def test_confidence_by_label_keeps_non_argmax_class_above_its_threshold(self) -> None:
+        pred = np.zeros((6, 10), dtype=np.float32)
+        pred[:4, 0] = np.array([4.0, 4.0, 4.0, 4.0], dtype=np.float32)
+        pred[4, 0] = 0.30
+        pred[5, 0] = 0.25
+
+        result = postprocess_yolo_outputs(
+            pred,
+            None,
+            names={0: "go", 1: "crossing"},
+            num_classes=2,
+            width=8,
+            height=8,
+            confidence=0.50,
+            confidence_by_label={"crossing": 0.20},
+            min_mask_area=0.0,
+        )
+
+        self.assertEqual([item.label for item in result.detections], ["crossing"])
+        self.assertEqual(result.detections[0].confidence, 0.25)
+
+    def test_confidence_by_label_does_not_expand_non_overridden_classes(self) -> None:
+        pred = np.zeros((7, 10), dtype=np.float32)
+        pred[:4, 0] = np.array([4.0, 4.0, 4.0, 4.0], dtype=np.float32)
+        pred[4, 0] = 0.90
+        pred[5, 0] = 0.80
+
+        result = postprocess_yolo_outputs(
+            pred,
+            None,
+            names={0: "go", 1: "stop", 2: "crossing"},
+            num_classes=3,
+            width=8,
+            height=8,
+            confidence=0.20,
+            confidence_by_label={"crossing": 0.20},
+            min_mask_area=0.0,
+        )
+
+        self.assertEqual([item.label for item in result.detections], ["go"])
+
+    def test_confidence_by_label_does_not_duplicate_argmax_override_label(self) -> None:
+        pred = np.zeros((6, 10), dtype=np.float32)
+        pred[:4, 0] = np.array([4.0, 4.0, 4.0, 4.0], dtype=np.float32)
+        pred[4, 0] = 0.25
+        pred[5, 0] = 0.90
+
+        result = postprocess_yolo_outputs(
+            pred,
+            None,
+            names={0: "go", 1: "crossing"},
+            num_classes=2,
+            width=8,
+            height=8,
+            confidence=0.20,
+            confidence_by_label={"crossing": 0.20},
+            min_mask_area=0.0,
+        )
+
+        self.assertEqual([item.label for item in result.detections], ["crossing"])
+
+    def test_confidence_by_label_keeps_one_best_override_per_row(self) -> None:
+        pred = np.zeros((7, 10), dtype=np.float32)
+        pred[:4, 0] = np.array([4.0, 4.0, 4.0, 4.0], dtype=np.float32)
+        pred[4, 0] = 0.30
+        pred[5, 0] = 0.25
+        pred[6, 0] = 0.24
+
+        result = postprocess_yolo_outputs(
+            pred,
+            None,
+            names={0: "blank", 1: "crossing", 2: "countdown_blank"},
+            num_classes=3,
+            width=8,
+            height=8,
+            confidence=0.50,
+            confidence_by_label={"crossing": 0.20, "countdown_blank": 0.20},
+            min_mask_area=0.0,
+        )
+
+        self.assertEqual([item.label for item in result.detections], ["crossing"])
+        self.assertEqual(result.detections[0].confidence, 0.25)
+
 
 if __name__ == "__main__":
     unittest.main()

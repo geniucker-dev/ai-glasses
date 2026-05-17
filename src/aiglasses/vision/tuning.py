@@ -9,6 +9,12 @@ from .types import Detection
 SIGNAL_TRAFFIC_LABELS = {"go", "stop", "countdown_go", "countdown_stop"}
 NON_SIGNAL_TRAFFIC_LABELS = {"blank", "countdown_blank", "crossing"}
 YELLOW_TRAFFIC_LABELS = {"countdown_go", "countdown_stop"}
+CROSSING_BOTTOM_FIELDS = {
+    "crossing_completion_bottom_max",
+    "crossing_mid_bottom_min",
+    "crosswalk_detection_stop_bottom_min",
+    "crossing_start_bottom_min",
+}
 
 
 @dataclass
@@ -28,12 +34,25 @@ class VisionTuning:
     traffic_min_area_ratio: float = 0.00005
     traffic_max_area_ratio: float = 0.10
     traffic_prefer_center_weight: float = 0.00
-    crosswalk_conf: float = 0.65
     crossing_green_required_frames: int = 2
     crossing_obstacles_enabled: bool = False
-    road_alert_area_ratio: float = 0.002
-    road_stop_area_ratio: float = 0.015
-    road_stop_bottom_min: float = 0.55
+    crossing_alignment_offset_max: float = 0.15
+    crossing_start_bottom_min: float = 0.60
+    crossing_mid_bottom_min: float = 0.45
+    crossing_completion_bottom_max: float = 0.35
+    crossing_completion_min_active_frames: int = 4
+    crossing_completion_min_active_seconds: float = 3.0
+    crossing_completion_lost_frames: int = 10
+    crossing_completion_required_frames: int = 3
+    crossing_wait_signal_suppress_frames: int = 3
+    crossing_obstacle_suppress_frames: int = 3
+    crossing_active_timeout_seconds: float = 45.0
+    crosswalk_detection_conf: float = 0.20
+    crosswalk_detection_min_area_ratio: float = 0.005
+    crosswalk_detection_x_min: float = 0.05
+    crosswalk_detection_x_max: float = 0.95
+    crosswalk_detection_alert_bottom_min: float = 0.25
+    crosswalk_detection_stop_bottom_min: float = 0.55
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -56,10 +75,10 @@ class VisionTuning:
             else:
                 changes[name] = float(value)
         tuning = replace(self, **changes)
-        tuning.clamp()
+        tuning.clamp(updated_fields=set(changes))
         return tuning
 
-    def clamp(self) -> None:
+    def clamp(self, *, updated_fields: set[str] | None = None) -> None:
         self.traffic_light_conf = _clamp(self.traffic_light_conf, 0.0, 1.0)
         self.traffic_signal_clear_margin = _clamp(self.traffic_signal_clear_margin, 0.0, 1.0)
         self.traffic_go_min_conf = _clamp(self.traffic_go_min_conf, 0.0, 1.0)
@@ -88,11 +107,118 @@ class VisionTuning:
                 self.traffic_min_area_ratio,
             )
         self.traffic_prefer_center_weight = _clamp(self.traffic_prefer_center_weight, 0.0, 1.0)
-        self.crosswalk_conf = _clamp(self.crosswalk_conf, 0.0, 1.0)
-        self.crossing_green_required_frames = max(1, min(10, int(self.crossing_green_required_frames)))
-        self.road_alert_area_ratio = _clamp(self.road_alert_area_ratio, 0.0, 1.0)
-        self.road_stop_area_ratio = _clamp(self.road_stop_area_ratio, 0.0, 1.0)
-        self.road_stop_bottom_min = _clamp(self.road_stop_bottom_min, 0.0, 1.0)
+        self.crossing_green_required_frames = max(
+            1,
+            min(10, int(self.crossing_green_required_frames)),
+        )
+        self.crossing_alignment_offset_max = _clamp(self.crossing_alignment_offset_max, 0.0, 1.0)
+        self.crossing_completion_bottom_max = _clamp(
+            self.crossing_completion_bottom_max,
+            0.0,
+            1.0,
+        )
+        self.crossing_mid_bottom_min = _clamp(self.crossing_mid_bottom_min, 0.0, 1.0)
+        self.crossing_start_bottom_min = _clamp(self.crossing_start_bottom_min, 0.0, 1.0)
+        self.crossing_completion_min_active_frames = max(
+            1,
+            min(300, int(self.crossing_completion_min_active_frames)),
+        )
+        self.crossing_completion_min_active_seconds = _clamp(
+            self.crossing_completion_min_active_seconds,
+            0.0,
+            120.0,
+        )
+        self.crossing_completion_lost_frames = max(
+            1,
+            min(300, int(self.crossing_completion_lost_frames)),
+        )
+        self.crossing_completion_required_frames = max(
+            1,
+            min(60, int(self.crossing_completion_required_frames)),
+        )
+        self.crossing_wait_signal_suppress_frames = max(
+            0,
+            min(120, int(self.crossing_wait_signal_suppress_frames)),
+        )
+        self.crossing_obstacle_suppress_frames = max(
+            0,
+            min(120, int(self.crossing_obstacle_suppress_frames)),
+        )
+        self.crossing_active_timeout_seconds = _clamp(
+            self.crossing_active_timeout_seconds,
+            1.0,
+            300.0,
+        )
+        self.crosswalk_detection_conf = _clamp(self.crosswalk_detection_conf, 0.0, 1.0)
+        self.crosswalk_detection_min_area_ratio = _clamp(
+            self.crosswalk_detection_min_area_ratio,
+            0.0,
+            1.0,
+        )
+        self.crosswalk_detection_x_min = _clamp(self.crosswalk_detection_x_min, 0.0, 1.0)
+        self.crosswalk_detection_x_max = _clamp(self.crosswalk_detection_x_max, 0.0, 1.0)
+        if self.crosswalk_detection_x_min > self.crosswalk_detection_x_max:
+            self.crosswalk_detection_x_min, self.crosswalk_detection_x_max = (
+                self.crosswalk_detection_x_max,
+                self.crosswalk_detection_x_min,
+            )
+        self.crosswalk_detection_alert_bottom_min = _clamp(
+            self.crosswalk_detection_alert_bottom_min,
+            0.0,
+            1.0,
+        )
+        self.crosswalk_detection_stop_bottom_min = _clamp(
+            self.crosswalk_detection_stop_bottom_min,
+            0.0,
+            1.0,
+        )
+        self._clamp_crossing_bottom_order(updated_fields=updated_fields)
+        self.crosswalk_detection_alert_bottom_min = min(
+            self.crosswalk_detection_alert_bottom_min,
+            self.crosswalk_detection_stop_bottom_min,
+        )
+
+    def _clamp_crossing_bottom_order(self, *, updated_fields: set[str] | None = None) -> None:
+        crossing_updates = (updated_fields or set()) & CROSSING_BOTTOM_FIELDS
+        if len(crossing_updates) == 1:
+            self._clamp_single_crossing_bottom_field(next(iter(crossing_updates)))
+            return
+        completion, middle, stop, start = sorted(
+            [
+                self.crossing_completion_bottom_max,
+                self.crossing_mid_bottom_min,
+                self.crosswalk_detection_stop_bottom_min,
+                self.crossing_start_bottom_min,
+            ]
+        )
+        self.crossing_completion_bottom_max = completion
+        self.crossing_mid_bottom_min = middle
+        self.crosswalk_detection_stop_bottom_min = stop
+        self.crossing_start_bottom_min = start
+
+    def _clamp_single_crossing_bottom_field(self, field: str) -> None:
+        if field == "crossing_completion_bottom_max":
+            self.crossing_completion_bottom_max = min(
+                self.crossing_completion_bottom_max,
+                self.crossing_mid_bottom_min,
+            )
+        elif field == "crossing_mid_bottom_min":
+            self.crossing_mid_bottom_min = _clamp(
+                self.crossing_mid_bottom_min,
+                self.crossing_completion_bottom_max,
+                self.crosswalk_detection_stop_bottom_min,
+            )
+        elif field == "crosswalk_detection_stop_bottom_min":
+            self.crosswalk_detection_stop_bottom_min = _clamp(
+                self.crosswalk_detection_stop_bottom_min,
+                self.crossing_mid_bottom_min,
+                self.crossing_start_bottom_min,
+            )
+        elif field == "crossing_start_bottom_min":
+            self.crossing_start_bottom_min = max(
+                self.crossing_start_bottom_min,
+                self.crosswalk_detection_stop_bottom_min,
+            )
 
 
 def default_vision_tuning(traffic_light_conf: float) -> VisionTuning:
@@ -131,7 +257,10 @@ def select_traffic_signal(
         "selected": None,
         "reason": "no_candidates_after_model_threshold" if not candidates else "raw_top_confidence",
         "thresholds": tuning.to_dict(),
-        "candidates": [_candidate_debug(det, tuning, width=width, height=height) for det in detections],
+        "candidates": [
+            _candidate_debug(det, tuning, width=width, height=height)
+            for det in detections
+        ],
     }
     if not candidates:
         return None, debug
@@ -142,7 +271,9 @@ def select_traffic_signal(
         return selected, debug
 
     eligible = [
-        det for det in candidates if _passes_traffic_filters(det, tuning, width=width, height=height)
+        det
+        for det in candidates
+        if _passes_traffic_filters(det, tuning, width=width, height=height)
     ]
     debug["filtered_candidates"] = [
         _candidate_debug(det, tuning, width=width, height=height) for det in eligible
@@ -171,7 +302,10 @@ def select_traffic_signal(
     if go is None:
         debug["reason"] = "no_signal_candidate"
         return None, debug
-    if non_signal is not None and go.confidence + tuning.traffic_signal_clear_margin < non_signal.confidence:
+    if (
+        non_signal is not None
+        and go.confidence + tuning.traffic_signal_clear_margin < non_signal.confidence
+    ):
         debug["reason"] = "non_signal_stronger_than_go"
         return None, debug
     conflict = max(
@@ -191,6 +325,52 @@ def select_traffic_signal(
     debug["selected"] = go.to_dict()
     debug["reason"] = "go_passed_filters"
     return go, debug
+
+
+def select_crosswalk_detection(
+    detections: list[Detection],
+    tuning: VisionTuning,
+    *,
+    width: int | None = None,
+    height: int | None = None,
+) -> Detection | None:
+    candidates = [
+        det
+        for det in detections
+        if det.label == "crossing"
+        and det.confidence >= tuning.crosswalk_detection_conf
+        and _normalised_box_area(_normalised_box(det, width=width, height=height))
+        >= tuning.crosswalk_detection_min_area_ratio
+        and _crosswalk_detection_box_passes(det, tuning, width=width, height=height)
+    ]
+    return max(
+        candidates,
+        key=lambda det: _crosswalk_detection_priority(det, width=width, height=height),
+        default=None,
+    )
+
+
+def _crosswalk_detection_box_passes(
+    det: Detection,
+    tuning: VisionTuning,
+    *,
+    width: int | None = None,
+    height: int | None = None,
+) -> bool:
+    x1, _, x2, _ = _normalised_box(det, width=width, height=height)
+    center_x = (x1 + x2) / 2.0
+    return tuning.crosswalk_detection_x_min <= center_x <= tuning.crosswalk_detection_x_max
+
+
+def _crosswalk_detection_priority(
+    det: Detection,
+    *,
+    width: int | None = None,
+    height: int | None = None,
+) -> tuple[float, float, float]:
+    box = _normalised_box(det, width=width, height=height)
+    _, _, _, y2 = box
+    return (y2, det.confidence, _normalised_box_area(box))
 
 
 def _best_label(
@@ -285,3 +465,8 @@ def _normalised_box(
         _clamp(x2, 0.0, 1.0),
         _clamp(y2, 0.0, 1.0),
     )
+
+
+def _normalised_box_area(box: tuple[float, float, float, float]) -> float:
+    x1, y1, x2, y2 = box
+    return max(0.0, x2 - x1) * max(0.0, y2 - y1)

@@ -10,7 +10,12 @@ from aiglasses.config import AppConfig
 
 from .obstacle_classes import OBSTACLE_LABELS, YOLOE_OBSTACLE_CLASS_NAMES
 from .torch_yolo import TorchYoloModel
-from .tuning import VisionTuning, default_vision_tuning, select_traffic_signal
+from .tuning import (
+    VisionTuning,
+    default_vision_tuning,
+    select_crosswalk_detection,
+    select_traffic_signal,
+)
 from .types import Detection, FrameAnalysis
 from .yolo_postprocess import ModelUnavailable, filter_detections
 
@@ -75,7 +80,7 @@ class VisionPipeline:
         if not hasattr(self, "tuning"):
             self.tuning = default_vision_tuning(self.config.vision_thresholds.traffic_light_conf)
         blind_summary = None
-        crosswalk_summary = None
+        crosswalk_detection = None
         obstacles = []
         traffic_light = None
         traffic_conf = 0.0
@@ -87,13 +92,6 @@ class VisionPipeline:
             try:
                 result = self.blind_model.predict(frame)
                 blind_summary = result.masks.get("blind_path")
-                crosswalk_summary = result.masks.get("road_crossing") or result.masks.get("crossing")
-                if (
-                    crosswalk_summary is not None
-                    and crosswalk_summary.confidence < self.tuning.crosswalk_conf
-                ):
-                    crosswalk_summary = None
-                    status["crosswalk_filter"] = "low_confidence"
                 status["blind_path"] = self.blind_model.status
             except Exception as exc:
                 status["blind_path"] = f"error: {exc}"
@@ -109,8 +107,19 @@ class VisionPipeline:
         if self.traffic_model:
             try:
                 self.traffic_model.confidence = self.tuning.traffic_light_conf
+                confidence_by_label = getattr(self.traffic_model, "confidence_by_label", None) or {}
+                self.traffic_model.confidence_by_label = {
+                    **confidence_by_label,
+                    "crossing": self.tuning.crosswalk_detection_conf,
+                }
                 result = self.traffic_model.predict(frame)
                 traffic_candidates = result.detections
+                crosswalk_detection = select_crosswalk_detection(
+                    result.detections,
+                    self.tuning,
+                    width=frame_width,
+                    height=frame_height,
+                )
                 traffic_detection, traffic_debug = select_traffic_signal(
                     result.detections,
                     self.tuning,
@@ -128,7 +137,7 @@ class VisionPipeline:
 
         analysis = FrameAnalysis(
             blind_path=blind_summary,
-            crosswalk=crosswalk_summary,
+            crosswalk_detection=crosswalk_detection,
             obstacles=obstacles,
             traffic_light=traffic_light,
             traffic_light_confidence=traffic_conf,

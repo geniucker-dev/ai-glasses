@@ -345,10 +345,23 @@ class WebAppTests(unittest.TestCase):
         self.assertEqual(response.json()["tuning"]["traffic_go_min_conf"], 0.2)
         self.assertEqual(response.json()["tuning"]["traffic_stop_min_conf"], 0.2)
         self.assertEqual(response.json()["tuning"]["traffic_yellow_min_conf"], 0.9)
-        self.assertEqual(response.json()["tuning"]["crosswalk_conf"], 0.65)
-        self.assertEqual(response.json()["tuning"]["road_alert_area_ratio"], 0.002)
-        self.assertEqual(response.json()["tuning"]["road_stop_area_ratio"], 0.015)
-        self.assertEqual(response.json()["tuning"]["road_stop_bottom_min"], 0.55)
+        self.assertEqual(response.json()["tuning"]["crossing_alignment_offset_max"], 0.15)
+        self.assertEqual(response.json()["tuning"]["crossing_start_bottom_min"], 0.60)
+        self.assertEqual(response.json()["tuning"]["crossing_mid_bottom_min"], 0.45)
+        self.assertEqual(response.json()["tuning"]["crossing_completion_bottom_max"], 0.35)
+        self.assertEqual(response.json()["tuning"]["crossing_completion_min_active_frames"], 4)
+        self.assertEqual(response.json()["tuning"]["crossing_completion_min_active_seconds"], 3.0)
+        self.assertEqual(response.json()["tuning"]["crossing_completion_lost_frames"], 10)
+        self.assertEqual(response.json()["tuning"]["crossing_completion_required_frames"], 3)
+        self.assertEqual(response.json()["tuning"]["crossing_wait_signal_suppress_frames"], 3)
+        self.assertEqual(response.json()["tuning"]["crossing_obstacle_suppress_frames"], 3)
+        self.assertEqual(response.json()["tuning"]["crossing_active_timeout_seconds"], 45.0)
+        self.assertEqual(response.json()["tuning"]["crosswalk_detection_conf"], 0.2)
+        self.assertEqual(response.json()["tuning"]["crosswalk_detection_min_area_ratio"], 0.005)
+        self.assertEqual(response.json()["tuning"]["crosswalk_detection_x_min"], 0.05)
+        self.assertEqual(response.json()["tuning"]["crosswalk_detection_x_max"], 0.95)
+        self.assertEqual(response.json()["tuning"]["crosswalk_detection_alert_bottom_min"], 0.25)
+        self.assertEqual(response.json()["tuning"]["crosswalk_detection_stop_bottom_min"], 0.55)
 
     def test_tuning_update_accepts_crossing_obstacles_enabled(self) -> None:
         from aiglasses.web.app import create_app
@@ -367,7 +380,7 @@ class WebAppTests(unittest.TestCase):
         self.assertIs(app.state.manager.vision.tuning.crossing_obstacles_enabled, True)
         self.assertIs(app.state.manager.navigation.tuning, app.state.manager.vision.tuning)
 
-    def test_tuning_update_accepts_road_alert_thresholds(self) -> None:
+    def test_tuning_update_accepts_crosswalk_detection_thresholds(self) -> None:
         from aiglasses.web.app import create_app
 
         app = create_app(AppConfig(path=Path("config.toml"), asr=AsrConfig(enabled=False)))
@@ -377,17 +390,126 @@ class WebAppTests(unittest.TestCase):
             response = client.post(
                 "/api/v1/debug/tuning",
                 json={
-                    "road_alert_area_ratio": 0.004,
-                    "road_stop_area_ratio": 0.020,
-                    "road_stop_bottom_min": 0.60,
+                    "crosswalk_detection_conf": 0.40,
+                    "crosswalk_detection_min_area_ratio": 0.010,
+                    "crosswalk_detection_x_min": 0.10,
+                    "crosswalk_detection_x_max": 0.90,
+                    "crosswalk_detection_alert_bottom_min": 0.30,
+                    "crosswalk_detection_stop_bottom_min": 0.60,
+                    "crossing_alignment_offset_max": 0.20,
+                    "crossing_start_bottom_min": 0.65,
+                    "crossing_mid_bottom_min": 0.50,
+                    "crossing_completion_bottom_max": 0.30,
+                    "crossing_completion_min_active_frames": 6,
+                    "crossing_completion_min_active_seconds": 4.5,
+                    "crossing_completion_lost_frames": 12,
+                    "crossing_completion_required_frames": 4,
+                    "crossing_wait_signal_suppress_frames": 5,
+                    "crossing_obstacle_suppress_frames": 6,
+                    "crossing_active_timeout_seconds": 50.0,
                 },
             )
 
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.json()["tuning"]["road_alert_area_ratio"], 0.004)
-        self.assertEqual(response.json()["tuning"]["road_stop_area_ratio"], 0.020)
-        self.assertEqual(response.json()["tuning"]["road_stop_bottom_min"], 0.60)
+        self.assertEqual(response.json()["tuning"]["crosswalk_detection_conf"], 0.40)
+        self.assertEqual(response.json()["tuning"]["crosswalk_detection_min_area_ratio"], 0.010)
+        self.assertEqual(response.json()["tuning"]["crosswalk_detection_x_min"], 0.10)
+        self.assertEqual(response.json()["tuning"]["crosswalk_detection_x_max"], 0.90)
+        self.assertEqual(response.json()["tuning"]["crosswalk_detection_alert_bottom_min"], 0.30)
+        self.assertEqual(response.json()["tuning"]["crosswalk_detection_stop_bottom_min"], 0.60)
+        self.assertEqual(response.json()["tuning"]["crossing_alignment_offset_max"], 0.20)
+        self.assertEqual(response.json()["tuning"]["crossing_start_bottom_min"], 0.65)
+        self.assertEqual(response.json()["tuning"]["crossing_mid_bottom_min"], 0.50)
+        self.assertEqual(response.json()["tuning"]["crossing_completion_bottom_max"], 0.30)
+        self.assertEqual(response.json()["tuning"]["crossing_completion_min_active_frames"], 6)
+        self.assertEqual(response.json()["tuning"]["crossing_completion_min_active_seconds"], 4.5)
+        self.assertEqual(response.json()["tuning"]["crossing_completion_lost_frames"], 12)
+        self.assertEqual(response.json()["tuning"]["crossing_completion_required_frames"], 4)
+        self.assertEqual(response.json()["tuning"]["crossing_wait_signal_suppress_frames"], 5)
+        self.assertEqual(response.json()["tuning"]["crossing_obstacle_suppress_frames"], 6)
+        self.assertEqual(response.json()["tuning"]["crossing_active_timeout_seconds"], 50.0)
         self.assertIs(app.state.manager.navigation.tuning, app.state.manager.vision.tuning)
+
+    def test_tuning_update_swaps_crosswalk_detection_x_range(self) -> None:
+        from aiglasses.web.app import create_app
+
+        app = create_app(AppConfig(path=Path("config.toml"), asr=AsrConfig(enabled=False)))
+        app.state.manager.benchmark_processing_capacity = lambda: {"status": "ready"}
+
+        with TestClient(app) as client:
+            response = client.post(
+                "/api/v1/debug/tuning",
+                json={"crosswalk_detection_x_min": 0.90, "crosswalk_detection_x_max": 0.10},
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["tuning"]["crosswalk_detection_x_min"], 0.10)
+        self.assertEqual(response.json()["tuning"]["crosswalk_detection_x_max"], 0.90)
+
+    def test_tuning_update_orders_crossing_bottom_thresholds(self) -> None:
+        from aiglasses.web.app import create_app
+
+        app = create_app(AppConfig(path=Path("config.toml"), asr=AsrConfig(enabled=False)))
+        app.state.manager.benchmark_processing_capacity = lambda: {"status": "ready"}
+
+        with TestClient(app) as client:
+            response = client.post(
+                "/api/v1/debug/tuning",
+                json={
+                    "crossing_completion_bottom_max": 0.80,
+                    "crossing_mid_bottom_min": 0.20,
+                    "crosswalk_detection_stop_bottom_min": 0.70,
+                    "crossing_start_bottom_min": 0.40,
+                },
+            )
+
+        tuning = response.json()["tuning"]
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(tuning["crossing_completion_bottom_max"], 0.20)
+        self.assertEqual(tuning["crossing_mid_bottom_min"], 0.40)
+        self.assertEqual(tuning["crosswalk_detection_stop_bottom_min"], 0.70)
+        self.assertEqual(tuning["crossing_start_bottom_min"], 0.80)
+
+    def test_tuning_update_clamps_single_crossing_bottom_field_without_drifting(
+        self,
+    ) -> None:
+        from aiglasses.web.app import create_app
+
+        app = create_app(AppConfig(path=Path("config.toml"), asr=AsrConfig(enabled=False)))
+        app.state.manager.benchmark_processing_capacity = lambda: {"status": "ready"}
+
+        with TestClient(app) as client:
+            response = client.post(
+                "/api/v1/debug/tuning",
+                json={"crossing_completion_bottom_max": 0.50},
+            )
+
+        tuning = response.json()["tuning"]
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(tuning["crossing_completion_bottom_max"], 0.45)
+        self.assertEqual(tuning["crossing_mid_bottom_min"], 0.45)
+        self.assertEqual(tuning["crosswalk_detection_stop_bottom_min"], 0.55)
+        self.assertEqual(tuning["crossing_start_bottom_min"], 0.60)
+
+    def test_tuning_update_clamps_crosswalk_alert_not_above_stop(self) -> None:
+        from aiglasses.web.app import create_app
+
+        app = create_app(AppConfig(path=Path("config.toml"), asr=AsrConfig(enabled=False)))
+        app.state.manager.benchmark_processing_capacity = lambda: {"status": "ready"}
+
+        with TestClient(app) as client:
+            response = client.post(
+                "/api/v1/debug/tuning",
+                json={
+                    "crosswalk_detection_alert_bottom_min": 0.80,
+                    "crosswalk_detection_stop_bottom_min": 0.55,
+                },
+            )
+
+        tuning = response.json()["tuning"]
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(tuning["crosswalk_detection_alert_bottom_min"], 0.55)
+        self.assertEqual(tuning["crosswalk_detection_stop_bottom_min"], 0.55)
 
     def test_recording_endpoints_delegate_to_manager(self) -> None:
         from aiglasses.web.app import create_app

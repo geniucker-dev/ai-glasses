@@ -190,6 +190,7 @@ def postprocess_yolo_outputs(
     width: int,
     height: int,
     confidence: float,
+    confidence_by_label: dict[str, float] | None = None,
     min_mask_area: float,
     letterbox: LetterboxTransform | None = None,
 ) -> YoloOutput:
@@ -216,17 +217,17 @@ def postprocess_yolo_outputs(
 
     has_masks = raw1 is not None and pred.shape[1] > 4 + num_classes
     class_scores = pred[:, 4 : 4 + num_classes]
-    class_ids = class_scores.argmax(axis=1)
-    scores = class_scores[np.arange(pred.shape[0]), class_ids]
-    keep = scores >= confidence
-    if valid_allowed_class_ids is not None:
-        keep &= np.isin(class_ids, list(valid_allowed_class_ids))
-    if not keep.any():
+    pred_indices, class_ids, scores = _candidate_classes(
+        class_scores,
+        names=names,
+        default_confidence=confidence,
+        confidence_by_label=confidence_by_label,
+        allowed_class_ids=valid_allowed_class_ids,
+    )
+    if pred_indices.size == 0:
         return YoloOutput([], {})
 
-    pred = pred[keep]
-    scores = scores[keep]
-    class_ids = class_ids[keep]
+    pred = pred[pred_indices]
     xywh = pred[:, :4]
     input_boxes = np.empty_like(xywh)
     input_boxes[:, 0] = xywh[:, 0] - xywh[:, 2] / 2
@@ -291,6 +292,55 @@ def postprocess_yolo_outputs(
         top_label=top.label if top else None,
         top_confidence=top.confidence if top else 0.0,
     )
+
+
+def _candidate_classes(
+    class_scores: np.ndarray,
+    *,
+    names: dict[int, str],
+    default_confidence: float,
+    confidence_by_label: dict[str, float] | None,
+    allowed_class_ids: set[int] | None,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    # Preserve normal YOLO single-label behavior for ordinary classes. Explicit
+    # per-label thresholds also apply to argmax detections for those labels.
+    class_ids = class_scores.argmax(axis=1)
+    scores = class_scores[np.arange(class_scores.shape[0]), class_ids]
+    thresholds = np.full(scores.shape, float(default_confidence), dtype=np.float32)
+    if confidence_by_label:
+        for label, threshold in confidence_by_label.items():
+            override_class_ids = [class_id for class_id, name in names.items() if name == label]
+            for class_id in override_class_ids:
+                thresholds[class_ids == class_id] = float(threshold)
+    keep = scores >= thresholds
+    if allowed_class_ids is not None:
+        keep &= np.isin(class_ids, list(allowed_class_ids))
+    pred_indices = np.nonzero(keep)[0]
+    kept_class_ids = class_ids[keep]
+    kept_scores = scores[keep]
+
+    if confidence_by_label:
+        best_override_class_ids = np.full(class_ids.shape, -1, dtype=class_ids.dtype)
+        best_override_scores = np.full(scores.shape, -np.inf, dtype=np.float32)
+        unused_rows = ~keep
+        for label, threshold in confidence_by_label.items():
+            override_class_ids = [class_id for class_id, name in names.items() if name == label]
+            for class_id in override_class_ids:
+                if allowed_class_ids is not None and class_id not in allowed_class_ids:
+                    continue
+                override_scores = class_scores[:, class_id]
+                override_keep = override_scores >= float(threshold)
+                override_keep &= unused_rows
+                better_override = override_keep & (override_scores > best_override_scores)
+                best_override_class_ids[better_override] = class_id
+                best_override_scores[better_override] = override_scores[better_override]
+        extra_indices = np.nonzero(best_override_class_ids >= 0)[0]
+        if extra_indices.size:
+            pred_indices = np.concatenate((pred_indices, extra_indices))
+            kept_class_ids = np.concatenate((kept_class_ids, best_override_class_ids[extra_indices]))
+            kept_scores = np.concatenate((kept_scores, best_override_scores[extra_indices]))
+
+    return pred_indices, kept_class_ids, kept_scores
 
 
 def filter_detections(detections: Iterable[Detection], labels: set[str]) -> list[Detection]:

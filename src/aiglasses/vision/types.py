@@ -32,7 +32,7 @@ class MaskSummary:
 @dataclass(frozen=True)
 class FrameAnalysis:
     blind_path: MaskSummary | None = None
-    crosswalk: MaskSummary | None = None
+    crosswalk_detection: Detection | None = None
     obstacles: list[Detection] = field(default_factory=list)
     traffic_light: str | None = None
     traffic_light_confidence: float = 0.0
@@ -47,7 +47,9 @@ class FrameAnalysis:
         nearest = max(self.obstacles, key=lambda item: item.area_ratio, default=None)
         return {
             "blind_path": self.blind_path.to_dict() if self.blind_path else None,
-            "crosswalk": self.crosswalk.to_dict() if self.crosswalk else None,
+            "crosswalk_detection": (
+                self.crosswalk_detection.to_dict() if self.crosswalk_detection else None
+            ),
             "nearest_obstacle": nearest.to_dict() if nearest else None,
             "obstacles": [item.to_dict() for item in self.obstacles],
             "traffic_light": self.traffic_light,

@@ -29,6 +29,7 @@ class TorchYoloModel:
         min_mask_area: float = 0.01,
         class_id_names: dict[int, str] | None = None,
         class_names: list[str] | tuple[str, ...] | None = None,
+        confidence_by_label: dict[str, float] | None = None,
     ) -> None:
         model_path = Path(path)
         if model_path.suffix != ".pt":
@@ -39,6 +40,7 @@ class TorchYoloModel:
         self.path = model_path
         self.width, self.height = image_size
         self.confidence = confidence
+        self.confidence_by_label = dict(confidence_by_label or {})
         self.kind = kind
         self.torch_device = torch_device
         self.torch_half = torch_half
@@ -131,6 +133,7 @@ class TorchYoloModel:
             width=self.width,
             height=self.height,
             confidence=self.confidence,
+            confidence_by_label=self.confidence_by_label,
             min_mask_area=self.min_mask_area,
             letterbox=letterbox,
         )

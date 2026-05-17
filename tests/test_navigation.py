@@ -9,10 +9,11 @@ class NavigationTests(unittest.TestCase):
         return {
             "frame_width": 640,
             "frame_height": 480,
-            "crosswalk": {
-                "center_offset": 0.0,
-                "area_ratio": 0.20,
-                "contour": [(0.2, 0.55), (0.8, 0.55), (0.8, 0.95), (0.2, 0.95)],
+            "crosswalk_detection": {
+                "label": "crossing",
+                "confidence": 0.90,
+                "box": (128, 240, 512, 432),
+                "area_ratio": 0.45,
             },
             "traffic_light": "go",
         }
@@ -21,10 +22,11 @@ class NavigationTests(unittest.TestCase):
         return {
             "frame_width": 640,
             "frame_height": 480,
-            "crosswalk": {
-                "center_offset": 0.0,
-                "area_ratio": 0.04,
-                "contour": [(0.3, 0.10), (0.7, 0.10), (0.7, 0.30), (0.3, 0.30)],
+            "crosswalk_detection": {
+                "label": "crossing",
+                "confidence": 0.90,
+                "box": (192, 48, 448, 144),
+                "area_ratio": 0.08,
             },
             "traffic_light": "go",
         }
@@ -33,10 +35,11 @@ class NavigationTests(unittest.TestCase):
         return {
             "frame_width": 640,
             "frame_height": 480,
-            "crosswalk": {
-                "center_offset": 0.0,
-                "area_ratio": 0.04,
-                "contour": [(0.3, 0.10), (0.7, 0.10), (0.7, 0.30), (0.3, 0.30)],
+            "crosswalk_detection": {
+                "label": "crossing",
+                "confidence": 0.90,
+                "box": (192, 48, 448, 144),
+                "area_ratio": 0.08,
             },
             "traffic_light": "go",
         }
@@ -46,10 +49,11 @@ class NavigationTests(unittest.TestCase):
             "frame_width": 640,
             "frame_height": 480,
             "blind_path": {"center_offset": 0.0, "angle_deg": 0},
-            "crosswalk": {
-                "center_offset": 0.0,
-                "area_ratio": 0.04,
-                "contour": [(0.25, 0.35), (0.75, 0.35), (0.75, 0.55), (0.25, 0.55)],
+            "crosswalk_detection": {
+                "label": "crossing",
+                "confidence": 0.90,
+                "box": (160, 168, 480, 264),
+                "area_ratio": 0.10,
             },
         }
 
@@ -70,11 +74,22 @@ class NavigationTests(unittest.TestCase):
 
     def _start_active_crossing(self, nav: NavigationStateMachine) -> None:
         nav.command("开始过马路")
-        self.assertIsNone(nav.process_observation(self._green_crossing_observation()).speech)
-        self.assertEqual(
-            nav.process_observation(self._green_crossing_observation()).speech,
-            "绿灯稳定，开始通行。",
-        )
+        result = self._drive_until_crossing_start(nav)
+        self.assertEqual(result.speech, "绿灯稳定，开始通行。")
+
+    def _drive_until_crossing_start(
+        self,
+        nav: NavigationStateMachine,
+        observation: dict[str, object] | None = None,
+        *,
+        max_frames: int = 8,
+    ):
+        frame = observation or self._green_crossing_observation()
+        for _ in range(max_frames):
+            result = nav.process_observation(frame)
+            if result.speech == "绿灯稳定，开始通行。":
+                return result
+        self.fail("crossing did not start")
 
     def test_command_starts_blind_path(self) -> None:
         nav = NavigationStateMachine()
@@ -155,16 +170,115 @@ class NavigationTests(unittest.TestCase):
         nav = NavigationStateMachine()
         nav.command("开始导航")
         observation = self._blind_path_crosswalk_observation()
-        observation["crosswalk"] = {
-            "center_offset": 0.0,
-            "area_ratio": 0.006,
-            "contour": [(0.30, 0.20), (0.70, 0.20), (0.70, 0.40), (0.30, 0.40)],
+        observation["crosswalk_detection"] = {
+            "label": "crossing",
+            "confidence": 0.90,
+            "box": (192, 96, 448, 192),
+            "area_ratio": 0.08,
         }
 
         result = nav.process_observation(observation)
 
-        self.assertEqual(result.speech, "前方发现路口，请注意红绿灯。")
+        self.assertEqual(result.speech, "前方发现路口。")
         self.assertEqual(result.mode, NavigationMode.BLIND_PATH)
+
+    def test_blind_path_tiny_crosswalk_detection_is_ignored(self) -> None:
+        nav = NavigationStateMachine()
+        nav.command("开始导航")
+        observation = self._blind_path_crosswalk_observation()
+        observation["crosswalk_detection"] = {
+            "label": "crossing",
+            "confidence": 0.90,
+            "box": (310, 440, 330, 460),
+            "area_ratio": 0.001,
+        }
+
+        result = nav.process_observation(observation)
+
+        self.assertEqual(result.speech, "保持直行。")
+
+    def test_blind_path_crosswalk_detection_outside_x_range_is_ignored(self) -> None:
+        nav = NavigationStateMachine(
+            tuning=VisionTuning(crosswalk_detection_x_min=0.40, crosswalk_detection_x_max=0.60)
+        )
+        nav.command("开始导航")
+        observation = self._blind_path_crosswalk_observation()
+        observation["crosswalk_detection"] = {
+            "label": "crossing",
+            "confidence": 0.90,
+            "box": (32, 168, 160, 300),
+        }
+
+        result = nav.process_observation(observation)
+
+        self.assertEqual(result.speech, "保持直行。")
+
+    def test_blind_path_non_crossing_detection_is_ignored(self) -> None:
+        nav = NavigationStateMachine()
+        nav.command("开始导航")
+        observation = self._blind_path_crosswalk_observation()
+        observation["crosswalk_detection"] = {
+            "label": "go",
+            "confidence": 0.90,
+            "box": (160, 168, 480, 300),
+        }
+
+        result = nav.process_observation(observation)
+
+        self.assertEqual(result.speech, "保持直行。")
+
+    def test_malformed_crosswalk_detection_is_ignored(self) -> None:
+        nav = NavigationStateMachine()
+        nav.command("开始导航")
+
+        result = nav.process_observation(
+            {
+                "blind_path": {"center_offset": 0.0, "angle_deg": 0},
+                "crosswalk_detection": {
+                    "label": "crossing",
+                    "confidence": "bad",
+                    "box": ("x", 10, 20, 30),
+                },
+            }
+        )
+
+        self.assertEqual(result.speech, "保持直行。")
+
+    def test_crossing_malformed_crosswalk_detection_does_not_crash(self) -> None:
+        nav = NavigationStateMachine()
+        nav.command("开始过马路")
+        observation = {
+            "traffic_light": "go",
+            "crosswalk_detection": {
+                "label": "crossing",
+                "confidence": object(),
+                "box": ("x", 10, 20, 30),
+            },
+        }
+
+        self.assertIsNone(nav.process_observation(observation).speech)
+        self.assertIsNone(nav.process_observation(observation).speech)
+        result = nav.process_observation(observation)
+
+        self.assertEqual(result.speech, "没看到斑马线，请原地小幅转动。")
+
+    def test_crossing_normalized_crosswalk_box_works_without_frame_size(self) -> None:
+        nav = NavigationStateMachine()
+        nav.command("开始过马路")
+
+        result = nav.process_observation(
+            {
+                "traffic_light": "go",
+                "crosswalk_detection": {
+                    "label": "crossing",
+                    "confidence": 0.90,
+                    "box": (0.25, 0.35, 0.75, 0.55),
+                },
+            }
+        )
+
+        self.assertIsNone(result.speech)
+        self.assertEqual(result.state["crossing_phase"], "aligning")
 
     def test_blind_path_crosswalk_stop_does_not_downgrade_to_distant_warning(self) -> None:
         nav = NavigationStateMachine(clock=lambda: 10.0)
@@ -175,10 +289,11 @@ class NavigationTests(unittest.TestCase):
             "前方到马路了，请先停下。",
         )
         observation = self._blind_path_crosswalk_observation()
-        observation["crosswalk"] = {
-            "center_offset": 0.0,
-            "area_ratio": 0.006,
-            "contour": [(0.30, 0.20), (0.70, 0.20), (0.70, 0.40), (0.30, 0.40)],
+        observation["crosswalk_detection"] = {
+            "label": "crossing",
+            "confidence": 0.90,
+            "box": (192, 96, 448, 192),
+            "area_ratio": 0.08,
         }
 
         result = nav.process_observation(observation)
@@ -187,13 +302,34 @@ class NavigationTests(unittest.TestCase):
         self.assertEqual(result.state["last_speech"], "前方到马路了，请先停下。")
 
     def test_blind_path_crosswalk_stop_distance_is_tunable(self) -> None:
-        nav = NavigationStateMachine(tuning=VisionTuning(road_stop_bottom_min=0.35))
+        nav = NavigationStateMachine(tuning=VisionTuning(crosswalk_detection_stop_bottom_min=0.35))
         nav.command("开始导航")
         observation = self._blind_path_crosswalk_observation()
-        observation["crosswalk"] = {
-            "center_offset": 0.0,
-            "area_ratio": 0.020,
-            "contour": [(0.30, 0.20), (0.70, 0.20), (0.70, 0.40), (0.30, 0.40)],
+        observation["crosswalk_detection"] = {
+            "label": "crossing",
+            "confidence": 0.90,
+            "box": (192, 96, 448, 192),
+            "area_ratio": 0.08,
+        }
+
+        result = nav.process_observation(observation)
+
+        self.assertEqual(result.speech, "前方到马路了，请先停下。")
+
+    def test_blind_path_crosswalk_stop_does_not_depend_on_alert_bottom(self) -> None:
+        nav = NavigationStateMachine(
+            tuning=VisionTuning(
+                crosswalk_detection_alert_bottom_min=0.80,
+                crosswalk_detection_stop_bottom_min=0.55,
+            )
+        )
+        nav.command("开始导航")
+        observation = self._blind_path_crosswalk_observation()
+        observation["crosswalk_detection"] = {
+            "label": "crossing",
+            "confidence": 0.90,
+            "box": (192, 96, 448, 288),
+            "area_ratio": 0.10,
         }
 
         result = nav.process_observation(observation)
@@ -453,14 +589,21 @@ class NavigationTests(unittest.TestCase):
         nav.command("开始过马路")
 
         self.assertEqual(
-            nav.process_observation({"crosswalk": {"center_offset": 0.0}}).speech,
+            nav.process_observation(
+                {
+                    "frame_width": 640,
+                    "frame_height": 480,
+                    "crosswalk_detection": {
+                        "label": "crossing",
+                        "confidence": 0.90,
+                        "box": (160, 160, 480, 240),
+                    },
+                }
+            ).speech,
             "发现斑马线，对准方向。",
         )
-        self.assertIsNone(nav.process_observation(self._green_crossing_observation()).speech)
-        self.assertEqual(
-            nav.process_observation(self._green_crossing_observation()).speech,
-            "绿灯稳定，开始通行。",
-        )
+        result = self._drive_until_crossing_start(nav)
+        self.assertEqual(result.speech, "绿灯稳定，开始通行。")
 
     def test_crossing_ignores_obstacle_model_outputs_by_default_before_go(self) -> None:
         nav = NavigationStateMachine(clock=lambda: 10.0)
@@ -470,7 +613,11 @@ class NavigationTests(unittest.TestCase):
             {
                 "frame_width": 640,
                 "frame_height": 480,
-                "crosswalk": {"center_offset": 0.0},
+                "crosswalk_detection": {
+                    "label": "crossing",
+                    "confidence": 0.90,
+                    "box": (160, 160, 480, 240),
+                },
                 "traffic_light": "go",
                 "obstacles": [
                     {
@@ -489,16 +636,17 @@ class NavigationTests(unittest.TestCase):
         nav = NavigationStateMachine(clock=lambda: 10.0)
         nav.command("开始过马路")
 
-        self.assertIsNone(nav.process_observation(self._green_crossing_observation()).speech)
-        self.assertEqual(
-            nav.process_observation(self._green_crossing_observation()).speech,
-            "绿灯稳定，开始通行。",
-        )
+        result = self._drive_until_crossing_start(nav)
+        self.assertEqual(result.speech, "绿灯稳定，开始通行。")
         result = nav.process_observation(
             {
                 "frame_width": 640,
                 "frame_height": 480,
-                "crosswalk": {"center_offset": 0.0},
+                "crosswalk_detection": {
+                    "label": "crossing",
+                    "confidence": 0.90,
+                    "box": (160, 160, 480, 240),
+                },
                 "traffic_light": "go",
                 "obstacles": [
                     {
@@ -527,11 +675,7 @@ class NavigationTests(unittest.TestCase):
             }
         ]
 
-        result = nav.process_observation(observation)
-
-        self.assertIsNone(result.speech)
-        result = nav.process_observation(observation)
-
+        result = self._drive_until_crossing_start(nav, observation)
         self.assertEqual(result.speech, "绿灯稳定，开始通行。")
 
     def test_green_crossing_with_two_wheel_obstacles_waits_when_enabled(self) -> None:
@@ -547,7 +691,11 @@ class NavigationTests(unittest.TestCase):
                     {
                         "frame_width": 640,
                         "frame_height": 480,
-                        "crosswalk": {"center_offset": 0.0},
+                        "crosswalk_detection": {
+                            "label": "crossing",
+                            "confidence": 0.90,
+                            "box": (160, 160, 480, 240),
+                        },
                         "traffic_light": "go",
                         "obstacles": [
                             {
@@ -570,8 +718,48 @@ class NavigationTests(unittest.TestCase):
             {
                 "frame_width": 640,
                 "frame_height": 480,
-                "crosswalk": {"center_offset": 0.0},
+                "crosswalk_detection": {
+                    "label": "crossing",
+                    "confidence": 0.90,
+                    "box": (160, 160, 480, 240),
+                },
                 "traffic_light": "stop",
+                "obstacles": [
+                    {
+                        "label": "car",
+                        "confidence": 0.9,
+                        "box": (230, 160, 410, 360),
+                        "area_ratio": 0.08,
+                    }
+                ],
+            }
+        )
+
+        self.assertEqual(result.speech, "红灯。")
+
+    def test_crossing_red_light_keeps_priority_over_obstacle_when_enabled(self) -> None:
+        nav = NavigationStateMachine(
+            clock=lambda: 10.0,
+            tuning=VisionTuning(crossing_obstacles_enabled=True),
+        )
+        nav.command("开始过马路")
+
+        result = nav.process_observation(
+            {
+                "frame_width": 640,
+                "frame_height": 480,
+                "crosswalk_detection": {
+                    "label": "crossing",
+                    "confidence": 0.90,
+                    "box": (160, 160, 480, 240),
+                },
+                "traffic_light": "stop",
+                "traffic_light_debug": {
+                    "selected": {"label": "stop", "confidence": 0.90},
+                    "filtered_candidates": [
+                        {"label": "stop", "confidence": 0.90},
+                    ],
+                },
                 "obstacles": [
                     {
                         "label": "car",
@@ -600,7 +788,14 @@ class NavigationTests(unittest.TestCase):
                 nav.command("开始过马路")
 
                 result = nav.process_observation(
-                    {"crosswalk": {"center_offset": 0.0}, "traffic_light": light}
+                    {
+                        "crosswalk_detection": {
+                            "label": "crossing",
+                            "confidence": 0.90,
+                            "box": (160, 160, 480, 240),
+                        },
+                        "traffic_light": light,
+                    }
                 )
 
                 self.assertEqual(result.speech, "黄灯。")
@@ -609,7 +804,8 @@ class NavigationTests(unittest.TestCase):
         nav = NavigationStateMachine(clock=lambda: 10.0)
         nav.command("开始过马路")
 
-        self.assertIsNone(nav.process_observation(self._green_crossing_observation()).speech)
+        for _ in range(4):
+            self.assertIsNone(nav.process_observation(self._green_crossing_observation()).speech)
         self.assertEqual(
             nav.process_observation(self._green_crossing_observation()).speech,
             "绿灯稳定，开始通行。",
@@ -620,23 +816,232 @@ class NavigationTests(unittest.TestCase):
         nav.command("开始过马路")
 
         self.assertIsNone(nav.process_observation(self._green_crossing_observation()).speech)
+        self.assertIsNone(nav.process_observation(self._green_crossing_observation()).speech)
+        self.assertIsNone(nav.process_observation(self._green_crossing_observation()).speech)
         self.assertEqual(
             nav.process_observation({"traffic_light": "stop"}).speech,
             "红灯。",
         )
-        self.assertIsNone(nav.process_observation(self._green_crossing_observation()).speech)
+        result = self._drive_until_crossing_start(nav)
+        self.assertEqual(result.speech, "绿灯稳定，开始通行。")
+
+    def test_crossing_does_not_start_when_current_frame_is_unknown(self) -> None:
+        nav = NavigationStateMachine(clock=lambda: 10.0)
+        nav.command("开始过马路")
+
+        for _ in range(4):
+            self.assertIsNone(nav.process_observation(self._green_crossing_observation()).speech)
+        observation = self._green_crossing_observation()
+        observation.pop("traffic_light")
+
+        result = nav.process_observation(observation)
+
+        self.assertEqual(result.mode, NavigationMode.CROSSING)
+        self.assertEqual(result.state["crossing_phase"], "ready")
+        self.assertFalse(result.state["crossing_active"])
+        self.assertEqual(result.state["crossing_green_frames"], 0)
+
+    def test_crossing_conflicting_signal_candidates_do_not_start(self) -> None:
+        nav = NavigationStateMachine(clock=lambda: 10.0)
+        nav.command("开始过马路")
+        observation = self._green_crossing_observation()
+        observation["traffic_light"] = "go"
+        observation["traffic_light_candidates"] = [
+            {"label": "go", "confidence": 0.90},
+            {"label": "stop", "confidence": 0.35},
+        ]
+        observation["traffic_light_debug"] = {
+            "selected": {"label": "go", "confidence": 0.90},
+            "filtered_candidates": [
+                {"label": "go", "confidence": 0.90},
+                {"label": "stop", "confidence": 0.35},
+            ],
+        }
+
+        for _ in range(8):
+            result = nav.process_observation(observation)
+
+        self.assertEqual(result.mode, NavigationMode.CROSSING)
+        self.assertFalse(result.state["crossing_active"])
+        self.assertEqual(result.state["crossing_green_frames"], 0)
+        self.assertGreater(result.state["crossing_wait_signal_recent_frames"], 0)
+
+    def test_crossing_wait_candidate_below_label_threshold_does_not_block_selected_go(
+        self,
+    ) -> None:
+        cases = (
+            ("stop", VisionTuning(traffic_stop_min_conf=0.80)),
+            ("countdown_go", VisionTuning(traffic_yellow_min_conf=0.80)),
+        )
+        for wait_label, tuning in cases:
+            with self.subTest(wait_label=wait_label):
+                nav = NavigationStateMachine(clock=lambda: 10.0, tuning=tuning)
+                nav.command("开始过马路")
+                observation = self._green_crossing_observation()
+                observation["traffic_light"] = "go"
+                observation["traffic_light_candidates"] = [
+                    {"label": "go", "confidence": 0.90},
+                    {"label": wait_label, "confidence": 0.35},
+                ]
+                observation["traffic_light_debug"] = {
+                    "selected": {"label": "go", "confidence": 0.90},
+                    "filtered_candidates": [
+                        {"label": "go", "confidence": 0.90},
+                        {"label": wait_label, "confidence": 0.35},
+                    ],
+                }
+
+                result = self._drive_until_crossing_start(nav, observation)
+
+                self.assertEqual(result.speech, "绿灯稳定，开始通行。")
+                self.assertEqual(result.state["crossing_wait_signal_recent_frames"], 0)
+
+    def test_crossing_wait_candidate_at_label_threshold_blocks_selected_go(self) -> None:
+        nav = NavigationStateMachine(
+            clock=lambda: 10.0,
+            tuning=VisionTuning(traffic_stop_min_conf=0.80),
+        )
+        nav.command("开始过马路")
+        observation = self._green_crossing_observation()
+        observation["traffic_light"] = "go"
+        observation["traffic_light_candidates"] = [
+            {"label": "go", "confidence": 0.90},
+            {"label": "stop", "confidence": 0.80},
+        ]
+        observation["traffic_light_debug"] = {
+            "selected": {"label": "go", "confidence": 0.90},
+            "filtered_candidates": [
+                {"label": "go", "confidence": 0.90},
+                {"label": "stop", "confidence": 0.80},
+            ],
+        }
+
+        for _ in range(8):
+            result = nav.process_observation(observation)
+
+        self.assertEqual(result.mode, NavigationMode.CROSSING)
+        self.assertFalse(result.state["crossing_active"])
+        self.assertEqual(result.state["crossing_green_frames"], 0)
+        self.assertGreater(result.state["crossing_wait_signal_recent_frames"], 0)
+
+    def test_crossing_selected_conflict_wait_below_label_threshold_still_blocks(
+        self,
+    ) -> None:
+        nav = NavigationStateMachine(
+            clock=lambda: 10.0,
+            tuning=VisionTuning(traffic_stop_min_conf=0.80),
+        )
+        nav.command("开始过马路")
+        observation = self._green_crossing_observation()
+        observation["traffic_light"] = "stop"
+        observation["traffic_light_candidates"] = [
+            {"label": "go", "confidence": 0.75},
+            {"label": "stop", "confidence": 0.70},
+        ]
+        observation["traffic_light_debug"] = {
+            "selected": {"label": "stop", "confidence": 0.70},
+            "reason": "go_conflicts_with_stop_or_yellow",
+            "filtered_candidates": [
+                {"label": "go", "confidence": 0.75},
+                {"label": "stop", "confidence": 0.70},
+            ],
+        }
+
+        result = nav.process_observation(observation)
+
+        self.assertEqual(result.speech, "红灯。")
+        self.assertEqual(result.mode, NavigationMode.CROSSING)
+        self.assertEqual(result.state["crossing_green_frames"], 0)
+        self.assertGreater(result.state["crossing_wait_signal_recent_frames"], 0)
+
+    def test_crossing_raw_wait_candidate_blocks_selected_go_without_filtered_candidates(
+        self,
+    ) -> None:
+        nav = NavigationStateMachine(clock=lambda: 10.0)
+        nav.command("开始过马路")
+        observation = self._green_crossing_observation()
+        observation["traffic_light"] = "go"
+        observation["traffic_light_candidates"] = [
+            {"label": "go", "confidence": 0.90},
+            {"label": "stop", "confidence": 0.35},
+        ]
+        observation["traffic_light_debug"] = {
+            "filter_enabled": False,
+            "selected": {"label": "go", "confidence": 0.90},
+        }
+
+        for _ in range(8):
+            result = nav.process_observation(observation)
+
+        self.assertEqual(result.mode, NavigationMode.CROSSING)
+        self.assertFalse(result.state["crossing_active"])
+        self.assertEqual(result.state["crossing_green_frames"], 0)
+        self.assertGreater(result.state["crossing_wait_signal_recent_frames"], 0)
+
+    def test_crossing_rejected_raw_green_candidate_does_not_start(self) -> None:
+        nav = NavigationStateMachine(clock=lambda: 10.0)
+        nav.command("开始过马路")
+        observation = self._green_crossing_observation()
+        observation.pop("traffic_light")
+        observation["traffic_light_candidates"] = [{"label": "go", "confidence": 0.90}]
+        observation["traffic_light_debug"] = {
+            "selected": None,
+            "reason": "no_candidates_after_spatial_filters",
+        }
+
+        for _ in range(8):
+            result = nav.process_observation(observation)
+
+        self.assertEqual(result.mode, NavigationMode.CROSSING)
+        self.assertFalse(result.state["crossing_active"])
+        self.assertEqual(result.state["crossing_phase"], "ready")
+        self.assertEqual(result.state["crossing_green_frames"], 0)
+        self.assertEqual(result.state["crossing_wait_signal_recent_frames"], 0)
+
+    def test_crossing_filtered_green_rejected_by_selector_does_not_start(self) -> None:
+        nav = NavigationStateMachine(clock=lambda: 10.0)
+        nav.command("开始过马路")
+        observation = self._green_crossing_observation()
+        observation.pop("traffic_light")
+        observation["traffic_light_candidates"] = [{"label": "go", "confidence": 0.30}]
+        observation["traffic_light_debug"] = {
+            "selected": None,
+            "reason": "no_signal_candidate",
+            "filtered_candidates": [{"label": "go", "confidence": 0.30}],
+        }
+
+        for _ in range(8):
+            result = nav.process_observation(observation)
+
+        self.assertEqual(result.mode, NavigationMode.CROSSING)
+        self.assertFalse(result.state["crossing_active"])
+        self.assertEqual(result.state["crossing_phase"], "ready")
+        self.assertEqual(result.state["crossing_green_frames"], 0)
+        self.assertEqual(result.state["crossing_wait_signal_recent_frames"], 0)
+
+    def test_crossing_unknown_light_does_not_set_wait_suppression(self) -> None:
+        nav = NavigationStateMachine(clock=lambda: 10.0)
+        nav.command("开始过马路")
+        observation = self._green_crossing_observation()
+        observation.pop("traffic_light")
+
+        for _ in range(3):
+            result = nav.process_observation(observation)
+
+        self.assertEqual(result.mode, NavigationMode.CROSSING)
+        self.assertEqual(result.state["crossing_phase"], "ready")
+        self.assertEqual(result.state["crossing_green_frames"], 0)
+        self.assertEqual(result.state["crossing_wait_signal_recent_frames"], 0)
 
     def test_crossing_crosswalk_loss_resets_green_stability(self) -> None:
         nav = NavigationStateMachine(clock=lambda: 10.0)
         nav.command("开始过马路")
 
         self.assertIsNone(nav.process_observation(self._green_crossing_observation()).speech)
-        self.assertIsNone(nav.process_observation({"traffic_light": "go"}).speech)
         self.assertIsNone(nav.process_observation(self._green_crossing_observation()).speech)
-        self.assertEqual(
-            nav.process_observation(self._green_crossing_observation()).speech,
-            "绿灯稳定，开始通行。",
-        )
+        self.assertIsNone(nav.process_observation({"traffic_light": "go"}).speech)
+        result = self._drive_until_crossing_start(nav)
+        self.assertEqual(result.speech, "绿灯稳定，开始通行。")
 
     def test_crossing_loss_before_green_does_not_complete(self) -> None:
         nav = NavigationStateMachine(clock=lambda: 10.0)
@@ -658,8 +1063,7 @@ class NavigationTests(unittest.TestCase):
         nav = NavigationStateMachine(clock=lambda: 10.0)
         nav.command("开始过马路")
 
-        self.assertIsNone(nav.process_observation(self._green_crossing_observation()).speech)
-        result = nav.process_observation(self._green_crossing_observation())
+        result = self._drive_until_crossing_start(nav)
 
         self.assertEqual(result.speech, "绿灯稳定，开始通行。")
         self.assertEqual(result.mode, NavigationMode.CROSSING)
@@ -701,7 +1105,7 @@ class NavigationTests(unittest.TestCase):
             self.assertIsNone(result.speech)
             self.assertEqual(result.mode, NavigationMode.CROSSING)
 
-        result = nav.process_observation({"crosswalk": {"center_offset": 0.0}})
+        result = nav.process_observation(self._green_crossing_observation())
 
         self.assertEqual(result.mode, NavigationMode.CROSSING)
         self.assertEqual(nav.mode, NavigationMode.CROSSING)
@@ -758,7 +1162,11 @@ class NavigationTests(unittest.TestCase):
             {
                 "frame_width": 640,
                 "frame_height": 480,
-                "crosswalk": {"center_offset": 0.0},
+                "crosswalk_detection": {
+                    "label": "crossing",
+                    "confidence": 0.90,
+                    "box": (160, 160, 480, 240),
+                },
                 "traffic_light": "go",
                 "obstacles": [
                     {
@@ -776,8 +1184,47 @@ class NavigationTests(unittest.TestCase):
             "绿灯，但斑马线附近疑似有长椅，请先等待，确认安全后再过街。",
         )
 
+    def test_crossing_current_obstacle_blocks_start_without_suppress_window(self) -> None:
+        nav = NavigationStateMachine(
+            clock=lambda: 10.0,
+            tuning=VisionTuning(
+                crossing_obstacles_enabled=True,
+                crossing_obstacle_suppress_frames=0,
+            ),
+        )
+        nav.command("开始过马路")
+        observation = self._green_crossing_observation()
+        observation["obstacles"] = [
+            {
+                "label": "car",
+                "confidence": 0.90,
+                "box": (230, 160, 410, 360),
+                "area_ratio": 0.08,
+            }
+        ]
+
+        speeches = []
+        for _ in range(8):
+            result = nav.process_observation(observation)
+            if result.speech is not None:
+                speeches.append(result.speech)
+
+        self.assertNotIn("绿灯稳定，开始通行。", speeches)
+        self.assertIn(
+            "绿灯，但斑马线附近疑似有车，请先等待，确认安全后再过街。",
+            speeches,
+        )
+        self.assertEqual(result.mode, NavigationMode.CROSSING)
+        self.assertEqual(result.state["crossing_phase"], "ready")
+        self.assertFalse(result.state["crossing_active"])
+        self.assertEqual(result.state["crossing_green_frames"], 0)
+        self.assertEqual(result.state["crossing_recent_obstacle_wait_frames"], 0)
+
     def test_crossing_arrival_evidence_warns_without_exiting(self) -> None:
-        nav = NavigationStateMachine(clock=lambda: 10.0)
+        nav = NavigationStateMachine(
+            clock=lambda: 10.0,
+            tuning=VisionTuning(crossing_completion_min_active_seconds=0.0),
+        )
         self._start_active_crossing(nav)
 
         for _ in range(3):
@@ -793,6 +1240,77 @@ class NavigationTests(unittest.TestCase):
         self.assertEqual(result.speech, "疑似已通过人行横道，请确认安全后停止过马路模式。")
         self.assertEqual(result.mode, NavigationMode.CROSSING)
         self.assertEqual(nav.mode, NavigationMode.CROSSING)
+
+    def test_crossing_completion_requires_min_active_seconds(self) -> None:
+        now = 10.0
+
+        def clock() -> float:
+            return now
+
+        nav = NavigationStateMachine(clock=clock)
+        self._start_active_crossing(nav)
+
+        now = 11.0
+        for _ in range(4):
+            result = nav.process_observation(self._arrival_crosswalk_observation())
+        self.assertIsNone(result.speech)
+        self.assertEqual(result.state["crossing_phase"], "crossing_active")
+
+        now = 13.1
+        for _ in range(3):
+            result = nav.process_observation(self._arrival_crosswalk_observation())
+
+        self.assertEqual(result.speech, "疑似已通过人行横道，请确认安全后停止过马路模式。")
+        self.assertEqual(result.state["crossing_phase"], "suspected_completed")
+
+    def test_crossing_completion_can_use_sustained_crosswalk_loss(self) -> None:
+        nav = NavigationStateMachine(
+            clock=lambda: 10.0,
+            tuning=VisionTuning(
+                crossing_completion_min_active_frames=1,
+                crossing_completion_min_active_seconds=0.0,
+                crossing_completion_lost_frames=2,
+                crossing_completion_required_frames=1,
+            ),
+        )
+        self._start_active_crossing(nav)
+
+        self.assertIsNone(nav.process_observation({"frame_width": 640, "frame_height": 480}).speech)
+        result = nav.process_observation({"frame_width": 640, "frame_height": 480})
+
+        self.assertEqual(result.speech, "疑似已通过人行横道，请确认安全后停止过马路模式。")
+        self.assertEqual(result.state["crossing_phase"], "suspected_completed")
+
+    def test_crossing_timeout_blocks_completion(self) -> None:
+        now = 10.0
+
+        def clock() -> float:
+            return now
+
+        nav = NavigationStateMachine(
+            clock=clock,
+            tuning=VisionTuning(
+                crossing_active_timeout_seconds=1.0,
+                crossing_completion_min_active_frames=1,
+                crossing_completion_min_active_seconds=0.0,
+                crossing_completion_required_frames=1,
+            ),
+        )
+        self._start_active_crossing(nav)
+        now = 12.0
+
+        result = nav.process_observation(self._arrival_crosswalk_observation())
+        self.assertEqual(result.speech, "过马路时间较长，请确认周围安全，必要时停止过马路模式。")
+        self.assertEqual(result.state["crossing_phase"], "crossing_active")
+        self.assertEqual(result.state["crossing_completion_candidate_frames"], 0)
+
+        for _ in range(3):
+            result = nav.process_observation(self._arrival_crosswalk_observation())
+
+        self.assertIsNone(result.speech)
+        self.assertEqual(result.state["crossing_phase"], "crossing_active")
+        self.assertFalse(result.state["crossing_completion_announced"])
+        self.assertEqual(result.state["crossing_completion_candidate_frames"], 0)
 
     def test_crossing_static_distant_crosswalk_does_not_start(self) -> None:
         nav = NavigationStateMachine(clock=lambda: 10.0)
@@ -825,14 +1343,17 @@ class NavigationTests(unittest.TestCase):
         self.assertEqual(result.mode, NavigationMode.CROSSING)
         self.assertEqual(nav.mode, NavigationMode.CROSSING)
 
-    def test_crossing_does_not_complete_without_arrival_area_ratio(self) -> None:
-        nav = NavigationStateMachine(clock=lambda: 10.0)
+    def test_crossing_completion_does_not_require_detection_area_ratio(self) -> None:
+        nav = NavigationStateMachine(
+            clock=lambda: 10.0,
+            tuning=VisionTuning(crossing_completion_min_active_seconds=0.0),
+        )
         self._start_active_crossing(nav)
 
         for _ in range(3):
             self.assertIsNone(nav.process_observation(self._green_crossing_observation()).speech)
         observation = self._arrival_crosswalk_observation()
-        crosswalk = observation["crosswalk"]
+        crosswalk = observation["crosswalk_detection"]
         self.assertIsInstance(crosswalk, dict)
         crosswalk.pop("area_ratio")
         for _ in range(3):
@@ -840,10 +1361,13 @@ class NavigationTests(unittest.TestCase):
 
         self.assertEqual(result.mode, NavigationMode.CROSSING)
         self.assertEqual(nav.mode, NavigationMode.CROSSING)
-        self.assertIsNone(result.speech)
+        self.assertEqual(result.speech, "疑似已通过人行横道，请确认安全后停止过马路模式。")
 
     def test_crossing_arrival_evidence_after_light_leaves_view_warns_without_exiting(self) -> None:
-        nav = NavigationStateMachine(clock=lambda: 10.0)
+        nav = NavigationStateMachine(
+            clock=lambda: 10.0,
+            tuning=VisionTuning(crossing_completion_min_active_seconds=0.0),
+        )
         self._start_active_crossing(nav)
 
         for _ in range(3):
@@ -886,13 +1410,16 @@ class NavigationTests(unittest.TestCase):
         self.assertEqual(result.mode, NavigationMode.CROSSING)
         self.assertEqual(nav.mode, NavigationMode.CROSSING)
         self.assertIsNotNone(result.state)
-        self.assertEqual(result.state["crossing_lost_crosswalk_frames"], 0)
+        self.assertEqual(result.state["crossing_lost_crosswalk_frames"], 1)
         self.assertEqual(result.state["crossing_clear_path_frames"], 0)
         for _ in range(3):
             self.assertIsNone(nav.process_observation({"traffic_light": "stop"}).speech)
 
     def test_crossing_transient_hazard_is_ignored_by_default_after_crossing_starts(self) -> None:
-        nav = NavigationStateMachine(clock=lambda: 10.0)
+        nav = NavigationStateMachine(
+            clock=lambda: 10.0,
+            tuning=VisionTuning(crossing_completion_min_active_seconds=0.0),
+        )
         self._start_active_crossing(nav)
 
         self.assertIsNone(nav.process_observation(self._green_crossing_observation()).speech)
@@ -935,7 +1462,7 @@ class NavigationTests(unittest.TestCase):
         self._start_active_crossing(nav)
         now = 56.0
 
-        result = nav.process_observation({"crosswalk": {"center_offset": 0.0}})
+        result = nav.process_observation(self._green_crossing_observation())
 
         self.assertEqual(result.speech, "过马路时间较长，请确认周围安全，必要时停止过马路模式。")
         self.assertEqual(result.mode, NavigationMode.CROSSING)
