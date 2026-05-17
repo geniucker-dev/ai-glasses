@@ -18,4 +18,6 @@ firmware/.pio/
 firmware/include/generated_config.h
 firmware/compile_commands.json
 
+ft/
+
 .DS_Store
