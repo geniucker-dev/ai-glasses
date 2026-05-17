@@ -74,12 +74,25 @@ const tuningFields = {
   traffic_min_area_ratio: { element: document.querySelector("#trafficMinAreaRatio"), type: "number" },
   traffic_max_area_ratio: { element: document.querySelector("#trafficMaxAreaRatio"), type: "number" },
   traffic_prefer_center_weight: { element: document.querySelector("#trafficPreferCenterWeight"), type: "number" },
-  crosswalk_conf: { element: document.querySelector("#crosswalkConf"), type: "number" },
   crossing_green_required_frames: { element: document.querySelector("#crossingGreenRequiredFrames"), type: "integer" },
   crossing_obstacles_enabled: { element: document.querySelector("#crossingObstaclesEnabled"), type: "boolean" },
-  road_alert_area_ratio: { element: document.querySelector("#roadAlertAreaRatio"), type: "number" },
-  road_stop_area_ratio: { element: document.querySelector("#roadStopAreaRatio"), type: "number" },
-  road_stop_bottom_min: { element: document.querySelector("#roadStopBottomMin"), type: "number" },
+  crossing_alignment_offset_max: { element: document.querySelector("#crossingAlignmentOffsetMax"), type: "number" },
+  crossing_start_bottom_min: { element: document.querySelector("#crossingStartBottomMin"), type: "number" },
+  crossing_mid_bottom_min: { element: document.querySelector("#crossingMidBottomMin"), type: "number" },
+  crossing_completion_bottom_max: { element: document.querySelector("#crossingCompletionBottomMax"), type: "number" },
+  crossing_completion_min_active_frames: { element: document.querySelector("#crossingCompletionMinActiveFrames"), type: "integer" },
+  crossing_completion_min_active_seconds: { element: document.querySelector("#crossingCompletionMinActiveSeconds"), type: "number" },
+  crossing_completion_lost_frames: { element: document.querySelector("#crossingCompletionLostFrames"), type: "integer" },
+  crossing_completion_required_frames: { element: document.querySelector("#crossingCompletionRequiredFrames"), type: "integer" },
+  crossing_wait_signal_suppress_frames: { element: document.querySelector("#crossingWaitSignalSuppressFrames"), type: "integer" },
+  crossing_obstacle_suppress_frames: { element: document.querySelector("#crossingObstacleSuppressFrames"), type: "integer" },
+  crossing_active_timeout_seconds: { element: document.querySelector("#crossingActiveTimeoutSeconds"), type: "number" },
+  crosswalk_detection_conf: { element: document.querySelector("#crosswalkDetectionConf"), type: "number" },
+  crosswalk_detection_min_area_ratio: { element: document.querySelector("#crosswalkDetectionMinAreaRatio"), type: "number" },
+  crosswalk_detection_x_min: { element: document.querySelector("#crosswalkDetectionXMin"), type: "number" },
+  crosswalk_detection_x_max: { element: document.querySelector("#crosswalkDetectionXMax"), type: "number" },
+  crosswalk_detection_alert_bottom_min: { element: document.querySelector("#crosswalkDetectionAlertBottomMin"), type: "number" },
+  crosswalk_detection_stop_bottom_min: { element: document.querySelector("#crosswalkDetectionStopBottomMin"), type: "number" },
 };
 
 function hasOwn(object, key) {
@@ -313,9 +326,9 @@ function drawOverlay() {
   ctx.clearRect(0, 0, rect.width, rect.height);
   if (!latestObservation) return;
   const blind = latestObservation.blind_path;
-  const crosswalk = latestObservation.crosswalk;
   const obstacles = latestObservation.obstacles || [];
   const traffic = latestObservation.traffic_light_detection;
+  const crosswalkDetection = latestObservation.crosswalk_detection;
   const visionFrame = currentVisionFrameSize();
 
   function colorOverlay(summary, color, label) {
@@ -352,7 +365,6 @@ function drawOverlay() {
   }
 
   colorOverlay(blind, "#2f9c67", blind?.label || "blind path");
-  colorOverlay(crosswalk, "#e4572e", crosswalk?.label || "crosswalk");
 
   const trafficCandidates = latestObservation.traffic_light_candidates || [];
   if (trafficOnlyView) {
@@ -360,6 +372,7 @@ function drawOverlay() {
     ctx.fillStyle = "rgba(56, 189, 248, 0.9)";
     ctx.lineWidth = 2;
     trafficCandidates.forEach((candidate) => drawDetectionBox(candidate, "#94a3b8"));
+    if (crosswalkDetection?.box) drawDetectionBox(crosswalkDetection, "#f97316", true);
     if (traffic?.box) drawDetectionBox(traffic, "#38bdf8", true);
     drawTrafficRoi(rect);
     return;
@@ -375,6 +388,10 @@ function drawOverlay() {
     ctx.strokeRect(x1 * sx, y1 * sy, (x2 - x1) * sx, (y2 - y1) * sy);
     ctx.fillText(obs.label, x1 * sx + 4, y1 * sy + 14);
   });
+
+  if (crosswalkDetection?.box) {
+    drawDetectionBox(crosswalkDetection, "#f97316", true);
+  }
 
   if (traffic?.box) {
     drawDetectionBox(traffic, "#38bdf8", true);
