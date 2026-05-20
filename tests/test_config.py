@@ -16,6 +16,7 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(config.models.image_height, 608)
         self.assertEqual(config.models.torch_device, "cuda:0")
         self.assertTrue(config.models.torch_half)
+        self.assertEqual(config.asr.command_languages, ["zh", "en"])
         self.assertEqual(config.speech.model, "sambert-zhichu-v1")
         self.assertEqual(config.speech.audio_format, "pcm")
         self.assertEqual(config.speech.sample_rate, 16000)
@@ -157,6 +158,25 @@ class ConfigTests(unittest.TestCase):
         self.assertFalse(config.asr.enabled)
         self.assertEqual(config.device.capture.audio_sample_rate, 24000)
         self.assertEqual(config.asr.sample_rate, 16000)
+
+    def test_asr_command_languages_are_validated(self) -> None:
+        cases = {
+            "not_list": '"zh"',
+            "empty": "[]",
+            "unsupported": '["fr"]',
+            "non_string": '["zh", 1]',
+        }
+        for name, value in cases.items():
+            with self.subTest(name=name):
+                with tempfile.TemporaryDirectory() as tmp:
+                    config_path = Path(tmp) / "config.toml"
+                    config_path.write_text(
+                        f"[asr]\ncommand_languages = {value}\n",
+                        encoding="utf-8",
+                    )
+
+                    with self.assertRaisesRegex(ValueError, r"asr\.command_languages"):
+                        load_config(config_path)
 
     def test_invalid_firmware_numeric_config_is_rejected(self) -> None:
         cases = {

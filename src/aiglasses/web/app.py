@@ -447,7 +447,11 @@ def create_app(config: AppConfig) -> FastAPI:
     validate_speech_config(config)
     speech = SpeechHub()
     vision = VisionPipeline(config)
-    navigation = NavigationStateMachine(tuning=vision.tuning)
+    navigation = NavigationStateMachine(
+        tuning=vision.tuning,
+        speech_language=config.speech.language,
+        command_languages=config.asr.command_languages,
+    )
     manager = DeviceManager(
         vision,
         navigation,

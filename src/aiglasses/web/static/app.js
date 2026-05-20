@@ -174,9 +174,13 @@ function speakInBrowser(text) {
   if (!webSpeechEnabled || !text || !("speechSynthesis" in window)) return;
   window.speechSynthesis.cancel();
   const utterance = new SpeechSynthesisUtterance(text);
-  utterance.lang = "zh-CN";
+  utterance.lang = browserSpeechLanguage(text);
   utterance.rate = 1.05;
   window.speechSynthesis.speak(utterance);
+}
+
+function browserSpeechLanguage(text) {
+  return /[\u3400-\u9fff\uf900-\ufaff]/u.test(text) ? "zh-CN" : "en-US";
 }
 
 function applyDeviceConnectionEvent(msg) {

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Iterable
 from dataclasses import dataclass
 from enum import StrEnum
 import time
@@ -23,6 +24,15 @@ class CrossingPhase(StrEnum):
     SUSPECTED_COMPLETED = "suspected_completed"
 
 
+class CommandIntent(StrEnum):
+    START_CROSSING = "start_crossing"
+    STOP_CROSSING = "stop_crossing"
+    START_TRAFFIC_LIGHT = "start_traffic_light"
+    STOP_DETECTION = "stop_detection"
+    START_BLIND_PATH = "start_blind_path"
+    STOP_BLIND_PATH = "stop_blind_path"
+
+
 @dataclass(frozen=True)
 class CrossingDetectionInfo:
     box: tuple[float, float, float, float]
@@ -43,35 +53,190 @@ class CrossingFrameContext:
 
 
 OBSTACLE_SPEECH_LABELS = {
-    "bicycle": "自行车",
-    "car": "车",
-    "motorcycle": "摩托车",
-    "bus": "公交车",
-    "truck": "卡车",
-    "animal": "动物",
-    "scooter": "滑板车",
-    "stroller": "婴儿车",
-    "dog": "狗",
-    "pole": "杆子",
-    "post": "柱子",
-    "column": "柱子",
-    "pillar": "柱子",
-    "stanchion": "立柱",
-    "bollard": "路桩",
-    "utility pole": "电线杆",
-    "telegraph pole": "电线杆",
-    "light pole": "灯杆",
-    "street pole": "路灯杆",
-    "signpost": "标志杆",
-    "support post": "支撑柱",
-    "vertical post": "立柱",
-    "bench": "长椅",
-    "chair": "椅子",
-    "potted plant": "盆栽",
-    "hydrant": "消防栓",
-    "cone": "锥桶",
-    "stone": "石头",
-    "box": "箱子",
+    "zh": {
+        "bicycle": "自行车",
+        "car": "车",
+        "motorcycle": "摩托车",
+        "bus": "公交车",
+        "truck": "卡车",
+        "animal": "动物",
+        "scooter": "滑板车",
+        "stroller": "婴儿车",
+        "dog": "狗",
+        "pole": "杆子",
+        "post": "柱子",
+        "column": "柱子",
+        "pillar": "柱子",
+        "stanchion": "立柱",
+        "bollard": "路桩",
+        "utility pole": "电线杆",
+        "telegraph pole": "电线杆",
+        "light pole": "灯杆",
+        "street pole": "路灯杆",
+        "signpost": "标志杆",
+        "support post": "支撑柱",
+        "vertical post": "立柱",
+        "bench": "长椅",
+        "chair": "椅子",
+        "potted plant": "盆栽",
+        "hydrant": "消防栓",
+        "cone": "锥桶",
+        "stone": "石头",
+        "box": "箱子",
+    },
+    "en": {
+        "bicycle": "bicycle",
+        "car": "vehicle",
+        "motorcycle": "motorcycle",
+        "bus": "bus",
+        "truck": "truck",
+        "animal": "animal",
+        "scooter": "scooter",
+        "stroller": "stroller",
+        "dog": "dog",
+        "pole": "pole",
+        "post": "post",
+        "column": "column",
+        "pillar": "pillar",
+        "stanchion": "post",
+        "bollard": "bollard",
+        "utility pole": "utility pole",
+        "telegraph pole": "utility pole",
+        "light pole": "light pole",
+        "street pole": "street pole",
+        "signpost": "signpost",
+        "support post": "support post",
+        "vertical post": "post",
+        "bench": "bench",
+        "chair": "chair",
+        "potted plant": "potted plant",
+        "hydrant": "hydrant",
+        "cone": "cone",
+        "stone": "stone",
+        "box": "box",
+    },
+}
+COMMAND_KEYWORDS: dict[CommandIntent, dict[str, tuple[str, ...]]] = {
+    CommandIntent.START_CROSSING: {
+        "zh": ("开始过马路", "帮我过马路"),
+        "en": (
+            "start crossing",
+            "begin crossing",
+            "cross the street",
+            "help me cross",
+        ),
+    },
+    CommandIntent.STOP_CROSSING: {
+        "zh": ("过马路结束", "结束过马路", "停止过马路", "取消过马路"),
+        "en": (
+            "stop crossing",
+            "end crossing",
+            "cancel crossing",
+            "finish crossing",
+            "crossing complete",
+        ),
+    },
+    CommandIntent.STOP_DETECTION: {
+        "zh": ("停止检测", "取消检测", "停止红绿灯", "取消红绿灯"),
+        "en": (
+            "stop detection",
+            "cancel detection",
+            "stop traffic light detection",
+            "cancel traffic light detection",
+            "stop traffic light",
+            "cancel traffic light",
+        ),
+    },
+    CommandIntent.START_TRAFFIC_LIGHT: {
+        "zh": ("检测红绿灯", "看红绿灯"),
+        "en": (
+            "detect traffic light",
+            "check traffic light",
+            "look at traffic light",
+            "traffic light detection",
+        ),
+    },
+    CommandIntent.START_BLIND_PATH: {
+        "zh": ("开始导航", "盲道导航", "帮我导航"),
+        "en": (
+            "start navigation",
+            "begin navigation",
+            "blind path navigation",
+            "guide me",
+        ),
+    },
+    CommandIntent.STOP_BLIND_PATH: {
+        "zh": ("停止导航", "结束导航", "取消导航"),
+        "en": ("stop navigation", "end navigation", "cancel navigation"),
+    },
+}
+SPEECH_MESSAGES = {
+    "zh": {
+        "blind_path_started": "盲道导航已启动。",
+        "blind_path_stopped": "盲道导航已停止。",
+        "crossing_started": "过马路模式已启动。",
+        "crossing_stopped": "过马路模式已停止。",
+        "traffic_light_started": "红绿灯检测已启动。",
+        "traffic_light_stopped": "红绿灯检测已停止。",
+        "no_active_detection": "当前没有正在进行的检测。",
+        "center_obstacle": "前方疑似有{label}，请先停下。",
+        "blind_path_obstacle": "前方盲道上疑似有{label}，请先停下。",
+        "road_stop": "前方到马路了，请先停下。",
+        "intersection_ahead": "前方有路口，请继续向前走。",
+        "blind_path_lost": "没看到盲道，请原地小幅转动。",
+        "adjust_left": "请向左微调，对准盲道。",
+        "adjust_right": "请向右微调，对准盲道。",
+        "turn_left": "请向左转动。",
+        "turn_right": "请向右转动。",
+        "keep_straight": "保持直行。",
+        "red_light": "红灯。",
+        "green_light": "绿灯。",
+        "yellow_light": "黄灯。",
+        "crossing_start_go": "绿灯稳定，开始通行。",
+        "crossing_completed": "疑似已通过人行横道，请确认安全后停止过马路模式。",
+        "crosswalk_align": "发现斑马线，对准方向。",
+        "crosswalk_lost": "没看到斑马线，请原地小幅转动。",
+        "crossing_timeout": "过马路时间较长，请确认周围安全，必要时停止过马路模式。",
+        "crossing_obstacle_go": "绿灯，但斑马线附近疑似有{label}，请先等待，确认安全后再过街。",
+        "crossing_obstacle": "斑马线附近疑似有{label}，请先等待。",
+    },
+    "en": {
+        "blind_path_started": "Blind path navigation started.",
+        "blind_path_stopped": "Blind path navigation stopped.",
+        "crossing_started": "Crossing mode started.",
+        "crossing_stopped": "Crossing mode stopped.",
+        "traffic_light_started": "Traffic light detection started.",
+        "traffic_light_stopped": "Traffic light detection stopped.",
+        "no_active_detection": "No detection is running.",
+        "center_obstacle": "Possible {label} ahead. Please stop first.",
+        "blind_path_obstacle": "Possible {label} on the tactile path. Please stop first.",
+        "road_stop": "Road ahead. Please stop first.",
+        "intersection_ahead": "Intersection ahead. Keep going forward.",
+        "blind_path_lost": "I can't see the tactile path. Turn slightly in place.",
+        "adjust_left": "Adjust slightly left to align with the tactile path.",
+        "adjust_right": "Adjust slightly right to align with the tactile path.",
+        "turn_left": "Turn left.",
+        "turn_right": "Turn right.",
+        "keep_straight": "Keep going straight.",
+        "red_light": "Red light.",
+        "green_light": "Green light.",
+        "yellow_light": "Yellow light.",
+        "crossing_start_go": "Green light is stable. Start crossing.",
+        "crossing_completed": (
+            "You may have crossed the crosswalk. Confirm it is safe, then stop crossing mode."
+        ),
+        "crosswalk_align": "Crosswalk detected. Align your direction.",
+        "crosswalk_lost": "I can't see the crosswalk. Turn slightly in place.",
+        "crossing_timeout": (
+            "Crossing is taking longer than expected. Confirm surroundings are safe "
+            "and stop crossing mode if needed."
+        ),
+        "crossing_obstacle_go": (
+            "Green light, but there may be {label} near the crosswalk. Wait first "
+            "and cross only after confirming it is safe."
+        ),
+        "crossing_obstacle": "Possible {label} near the crosswalk. Please wait.",
+    },
 }
 BLIND_PATH_MIN_CONFIDENCE = 0.35
 BLIND_PATH_MIN_AREA_RATIO = 0.003
@@ -103,9 +268,13 @@ class NavigationStateMachine:
         *,
         clock: Callable[[], float] = time.monotonic,
         tuning: VisionTuning | None = None,
+        speech_language: str = "zh",
+        command_languages: Iterable[str] = ("zh",),
     ) -> None:
         self.mode = NavigationMode.IDLE
         self.tuning = tuning or VisionTuning()
+        self.speech_language = self._normalize_language(speech_language)
+        self.command_languages = self._normalize_command_languages(command_languages)
         self.last_speech = ""
         self._clock = clock
         self._candidate_speech = ""
@@ -130,27 +299,55 @@ class NavigationStateMachine:
         self._blind_path_road_stop_latched = False
 
     def command(self, text: str) -> NavigationResult:
-        normalized = text.strip()
+        intent = self._command_intent(text)
         speech: str | None = None
-        if any(k in normalized for k in ("开始过马路", "帮我过马路")):
+        if intent == CommandIntent.START_CROSSING:
             self.mode = NavigationMode.CROSSING
             self._reset_guidance_debounce()
-            speech = "过马路模式已启动。"
-        elif any(k in normalized for k in ("过马路结束", "结束过马路", "停止过马路", "取消过马路")):
+            speech = self._speech("crossing_started")
+        elif intent == CommandIntent.STOP_CROSSING:
             speech = self._stop_current_mode()
-        elif any(k in normalized for k in ("检测红绿灯", "看红绿灯")):
+        elif intent == CommandIntent.START_TRAFFIC_LIGHT:
             self.mode = NavigationMode.TRAFFIC_LIGHT
             self._reset_guidance_debounce()
-            speech = "红绿灯检测已启动。"
-        elif any(k in normalized for k in ("停止检测", "取消检测", "停止红绿灯", "取消红绿灯")):
+            speech = self._speech("traffic_light_started")
+        elif intent == CommandIntent.STOP_DETECTION:
             speech = self._stop_current_mode()
-        elif any(k in normalized for k in ("开始导航", "盲道导航", "帮我导航")):
+        elif intent == CommandIntent.START_BLIND_PATH:
             self.mode = NavigationMode.BLIND_PATH
             self._reset_guidance_debounce()
-            speech = "盲道导航已启动。"
-        elif any(k in normalized for k in ("停止导航", "结束导航", "取消导航")):
+            speech = self._speech("blind_path_started")
+        elif intent == CommandIntent.STOP_BLIND_PATH:
             speech = self._stop_current_mode()
         return NavigationResult(self.mode, speech=speech, state=self.snapshot())
+
+    @staticmethod
+    def _normalize_language(language: str) -> str:
+        value = str(language or "").strip().lower()
+        if value.startswith("en"):
+            return "en"
+        return "zh"
+
+    @classmethod
+    def _normalize_command_languages(cls, languages: Iterable[str]) -> frozenset[str]:
+        if isinstance(languages, str):
+            languages = (languages,)
+        normalized = {cls._normalize_language(language) for language in languages}
+        return frozenset(normalized or {"zh"})
+
+    def _command_intent(self, text: str) -> CommandIntent | None:
+        normalized = text.strip().lower()
+        if not normalized:
+            return None
+        for intent, phrases_by_language in COMMAND_KEYWORDS.items():
+            for language in self.command_languages:
+                if any(phrase in normalized for phrase in phrases_by_language[language]):
+                    return intent
+        return None
+
+    def _speech(self, key: str, **kwargs: Any) -> str:
+        template = SPEECH_MESSAGES[self.speech_language][key]
+        return template.format(**kwargs)
 
     def process_observation(self, observation: dict[str, Any]) -> NavigationResult:
         speech = None
@@ -169,6 +366,8 @@ class NavigationStateMachine:
         return {
             "mode": self.mode.value,
             "last_speech": self.last_speech,
+            "speech_language": self.speech_language,
+            "command_languages": sorted(self.command_languages),
             "candidate_speech": self._candidate_speech,
             "candidate_frames": self._candidate_frames,
             "tuning": self.tuning.to_dict(),
@@ -249,20 +448,20 @@ class NavigationStateMachine:
     def _stop_current_mode(self) -> str:
         mode_to_stop = self.mode
         if mode_to_stop == NavigationMode.TRAFFIC_LIGHT:
-            speech = "红绿灯检测已停止。"
+            speech = self._speech("traffic_light_stopped")
         elif mode_to_stop == NavigationMode.CROSSING:
-            speech = "过马路模式已停止。"
+            speech = self._speech("crossing_stopped")
         elif mode_to_stop == NavigationMode.BLIND_PATH:
-            speech = "盲道导航已停止。"
+            speech = self._speech("blind_path_stopped")
         else:
-            speech = "当前没有正在进行的检测。"
+            speech = self._speech("no_active_detection")
         self.mode = NavigationMode.IDLE
         self._reset_guidance_debounce()
         return speech
 
     @staticmethod
     def _is_detection_loss_speech(speech: str) -> bool:
-        return speech.startswith("没看到")
+        return speech.startswith("没看到") or speech.startswith("I can't see")
 
     @staticmethod
     def _is_urgent_speech(speech: str) -> bool:
@@ -272,16 +471,29 @@ class NavigationStateMachine:
             or speech.startswith("前方盲道上")
             or speech.startswith("绿灯，但斑马线附近")
             or speech.startswith("斑马线附近疑似有")
+            or speech.startswith("Possible ")
+            or speech.startswith("Green light, but")
             or speech
             in {
                 "红灯。",
                 "绿灯。",
                 "黄灯。",
-                "前方发现路口。",
+                "前方有路口，请继续向前走。",
                 "前方到马路了，请先停下。",
                 "绿灯稳定，开始通行。",
                 "疑似已通过人行横道，请确认安全后停止过马路模式。",
                 "过马路时间较长，请确认周围安全，必要时停止过马路模式。",
+                "Red light.",
+                "Green light.",
+                "Yellow light.",
+                "Intersection ahead. Keep going forward.",
+                "Road ahead. Please stop first.",
+                "Green light is stable. Start crossing.",
+                "You may have crossed the crosswalk. Confirm it is safe, then stop crossing mode.",
+                (
+                    "Crossing is taking longer than expected. Confirm surroundings are safe "
+                    "and stop crossing mode if needed."
+                ),
             }
         )
 
@@ -302,36 +514,39 @@ class NavigationStateMachine:
             obstacle = self._find_centered_near_obstacle(obs)
             if obstacle:
                 label = self._obstacle_speech_label(obstacle)
-                return f"前方疑似有{label}，请先停下。"
+                return self._speech("center_obstacle", label=label)
             if crosswalk_detection_near_stop:
                 self._blind_path_road_stop_latched = True
-                return "前方到马路了，请先停下。"
+                return self._speech("road_stop")
             if self._blind_path_road_stop_latched and crosswalk_detection_visible:
-                return "前方到马路了，请先停下。"
+                return self._speech("road_stop")
             if crosswalk_detection_visible:
-                return "前方发现路口。"
-            return "没看到盲道，请原地小幅转动。"
+                return self._speech("intersection_ahead")
+            return self._speech("blind_path_lost")
         obstacle = self._find_blind_path_obstacle(obs)
         if obstacle:
-            return f"前方盲道上疑似有{self._obstacle_speech_label(obstacle)}，请先停下。"
+            return self._speech(
+                "blind_path_obstacle",
+                label=self._obstacle_speech_label(obstacle),
+            )
         if crosswalk_detection_near_stop:
             self._blind_path_road_stop_latched = True
-            return "前方到马路了，请先停下。"
+            return self._speech("road_stop")
         if self._blind_path_road_stop_latched and crosswalk_detection_visible:
-            return "前方到马路了，请先停下。"
+            return self._speech("road_stop")
         if crosswalk_detection_visible:
-            return "前方发现路口。"
+            return self._speech("intersection_ahead")
         offset = self._float_value(blind.get("center_offset"), 0.0)
         angle = self._float_value(blind.get("angle_deg"), 0.0)
         if offset < -0.18:
-            return "请向左微调，对准盲道。"
+            return self._speech("adjust_left")
         if offset > 0.18:
-            return "请向右微调，对准盲道。"
+            return self._speech("adjust_right")
         if angle < -12:
-            return "请向左转动。"
+            return self._speech("turn_left")
         if angle > 12:
-            return "请向右转动。"
-        return "保持直行。"
+            return self._speech("turn_right")
+        return self._speech("keep_straight")
 
     def _is_blind_path_crosswalk_detection_visible(
         self,
@@ -376,10 +591,10 @@ class NavigationStateMachine:
             return None
         return box
 
-    @staticmethod
-    def _obstacle_speech_label(obstacle: dict[str, Any]) -> str:
+    def _obstacle_speech_label(self, obstacle: dict[str, Any]) -> str:
         label = str(obstacle.get("label") or "").strip()
-        return OBSTACLE_SPEECH_LABELS.get(label, label or "障碍物")
+        fallback = "障碍物" if self.speech_language == "zh" else "obstacle"
+        return OBSTACLE_SPEECH_LABELS[self.speech_language].get(label, label or fallback)
 
     def _find_blind_path_obstacle(self, obs: dict[str, Any]) -> dict[str, Any] | None:
         blind = obs.get("blind_path")
@@ -741,7 +956,7 @@ class NavigationStateMachine:
                 return None, entered_ready
             if self._ready_crossing_can_start(ctx):
                 self._start_active_crossing(ctx.crosswalk)
-                return "绿灯稳定，开始通行。", entered_ready
+                return self._speech("crossing_start_go"), entered_ready
             return None, entered_ready
 
         if self._crossing_phase == CrossingPhase.ACTIVE:
@@ -818,7 +1033,7 @@ class NavigationStateMachine:
             self._crossing_completion_candidate_frames = 0
             self._crossing_completion_announced = True
             self._crossing_phase = CrossingPhase.SUSPECTED_COMPLETED
-            return "疑似已通过人行横道，请确认安全后停止过马路模式。"
+            return self._speech("crossing_completed")
         return None
 
     def _update_active_crosswalk_history(self, crosswalk: CrossingDetectionInfo | None) -> None:
@@ -910,34 +1125,34 @@ class NavigationStateMachine:
 
     def _crossing_continuous_speech(self, ctx: CrossingFrameContext) -> str | None:
         if ctx.has_wait_caution:
-            return "红灯。" if ctx.wait_label == "stop" else "黄灯。"
+            return self._speech("red_light" if ctx.wait_label == "stop" else "yellow_light")
         if ctx.obstacle_hazard is not None:
             light = "go" if ctx.has_pure_go else None
             return self._crossing_obstacle_wait_message(ctx.obstacle_hazard, light)
         if self._crossing_phase == CrossingPhase.ALIGNING and ctx.crosswalk is not None:
             if ctx.crosswalk.center_offset < -self.tuning.crossing_alignment_offset_max:
-                return "请向左转动。"
+                return self._speech("turn_left")
             if ctx.crosswalk.center_offset > self.tuning.crossing_alignment_offset_max:
-                return "请向右转动。"
+                return self._speech("turn_right")
             if ctx.crosswalk.bottom >= self.tuning.crosswalk_detection_stop_bottom_min:
                 return None
-            return "发现斑马线，对准方向。"
+            return self._speech("crosswalk_align")
         if self._crossing_phase == CrossingPhase.SEARCHING and ctx.crosswalk is None:
-            return "没看到斑马线，请原地小幅转动。"
+            return self._speech("crosswalk_lost")
         if (
             self._crossing_phase == CrossingPhase.ACTIVE
             and not self._crossing_timeout_announced
             and self._crossing_timed_out()
         ):
             self._crossing_timeout_announced = True
-            return "过马路时间较长，请确认周围安全，必要时停止过马路模式。"
+            return self._speech("crossing_timeout")
         return None
 
     def _crossing_obstacle_wait_message(self, obstacle: dict[str, Any], light: Any) -> str:
         label = self._obstacle_speech_label(obstacle)
         if light == "go":
-            return f"绿灯，但斑马线附近疑似有{label}，请先等待，确认安全后再过街。"
-        return f"斑马线附近疑似有{label}，请先等待。"
+            return self._speech("crossing_obstacle_go", label=label)
+        return self._speech("crossing_obstacle", label=label)
 
     def _find_crossing_obstacle_hazard(
         self,
@@ -979,9 +1194,9 @@ class NavigationStateMachine:
     def _traffic_light_guidance(self, obs: dict[str, Any]) -> str | None:
         light = obs.get("traffic_light")
         if light == "go":
-            return "绿灯。"
+            return self._speech("green_light")
         if light == "stop":
-            return "红灯。"
+            return self._speech("red_light")
         if light in {"countdown_go", "countdown_stop"}:
-            return "黄灯。"
+            return self._speech("yellow_light")
         return None

@@ -97,6 +97,45 @@ class NavigationTests(unittest.TestCase):
         self.assertEqual(result.mode, NavigationMode.BLIND_PATH)
         self.assertEqual(result.speech, "盲道导航已启动。")
 
+    def test_english_command_and_speech_language(self) -> None:
+        nav = NavigationStateMachine(speech_language="en", command_languages=("en",))
+
+        result = nav.command("start navigation")
+
+        self.assertEqual(result.mode, NavigationMode.BLIND_PATH)
+        self.assertEqual(result.speech, "Blind path navigation started.")
+
+        result = nav.process_observation(
+            {"blind_path": {"center_offset": 0.0, "angle_deg": 0}}
+        )
+
+        self.assertEqual(result.speech, "Keep going straight.")
+
+    def test_command_languages_gate_accepted_commands(self) -> None:
+        nav = NavigationStateMachine(speech_language="en", command_languages=("en",))
+
+        result = nav.command("开始导航")
+
+        self.assertEqual(result.mode, NavigationMode.IDLE)
+        self.assertIsNone(result.speech)
+
+    def test_command_parser_can_accept_chinese_and_english(self) -> None:
+        nav = NavigationStateMachine(command_languages=("zh", "en"))
+
+        result = nav.command("start crossing")
+
+        self.assertEqual(result.mode, NavigationMode.CROSSING)
+        self.assertEqual(result.speech, "过马路模式已启动。")
+
+    def test_english_stop_detection_command_wins_over_traffic_light_phrase(self) -> None:
+        nav = NavigationStateMachine(speech_language="en", command_languages=("en",))
+        nav.command("traffic light detection")
+
+        result = nav.command("stop traffic light detection")
+
+        self.assertEqual(result.mode, NavigationMode.IDLE)
+        self.assertEqual(result.speech, "Traffic light detection stopped.")
+
     def test_blind_path_side_car_does_not_stop(self) -> None:
         nav = NavigationStateMachine()
         nav.command("开始导航")
@@ -179,7 +218,23 @@ class NavigationTests(unittest.TestCase):
 
         result = nav.process_observation(observation)
 
-        self.assertEqual(result.speech, "前方发现路口。")
+        self.assertEqual(result.speech, "前方有路口，请继续向前走。")
+        self.assertEqual(result.mode, NavigationMode.BLIND_PATH)
+
+    def test_blind_path_distant_crosswalk_uses_english_forward_guidance(self) -> None:
+        nav = NavigationStateMachine(speech_language="en")
+        nav.command("开始导航")
+        observation = self._blind_path_crosswalk_observation()
+        observation["crosswalk_detection"] = {
+            "label": "crossing",
+            "confidence": 0.90,
+            "box": (192, 96, 448, 192),
+            "area_ratio": 0.08,
+        }
+
+        result = nav.process_observation(observation)
+
+        self.assertEqual(result.speech, "Intersection ahead. Keep going forward.")
         self.assertEqual(result.mode, NavigationMode.BLIND_PATH)
 
     def test_blind_path_tiny_crosswalk_detection_is_ignored(self) -> None:

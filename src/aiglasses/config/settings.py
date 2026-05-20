@@ -101,6 +101,7 @@ class AsrConfig:
     http_base_url: str = "https://dashscope.aliyuncs.com/api/v1"
     sample_rate: int = 16000
     language: str = "zh-CN"
+    command_languages: tuple[str, ...] = ("zh",)
 
 
 @dataclass(frozen=True)
@@ -163,6 +164,19 @@ def _validate_int_range(name: str, value: int, *, minimum: int, maximum: int | N
         raise ValueError(f"Config value {name} must be between {minimum} and {maximum}")
 
 
+def _validate_command_languages(value: Any) -> None:
+    if isinstance(value, str) or not isinstance(value, (list, tuple)):
+        raise ValueError("Config value asr.command_languages must be a list of language codes")
+    if not value:
+        raise ValueError("Config value asr.command_languages must not be empty")
+    for language in value:
+        if not isinstance(language, str):
+            raise ValueError("Config value asr.command_languages must contain only strings")
+        language_code = language.strip().lower()
+        if not (language_code == "zh" or language_code.startswith("zh-") or language_code == "en" or language_code.startswith("en-")):
+            raise ValueError("Config value asr.command_languages must contain only 'zh' or 'en'")
+
+
 def _validate_config(config: AppConfig) -> None:
     device_id_bytes = config.device.id.encode("utf-8")
     if not device_id_bytes:
@@ -181,6 +195,7 @@ def _validate_config(config: AppConfig) -> None:
     _validate_int_range("models.image_width", config.models.image_width, minimum=1)
     _validate_int_range("models.image_height", config.models.image_height, minimum=1)
     _validate_int_range("asr.sample_rate", config.asr.sample_rate, minimum=1)
+    _validate_command_languages(config.asr.command_languages)
     _validate_int_range(
         "device.transport.video_payload_bytes",
         transport.video_payload_bytes,
